@@ -1,0 +1,51 @@
+name: build historical dataset
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/fencha/datasets/**"
+      - "src/fencha/cli.py"
+      - "tests/test_parlgov.py"
+      - ".github/workflows/build-historical-dataset.yml"
+
+jobs:
+  parlgov-leader-exit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[dev]'
+      - run: pytest -q
+      - name: Build official ParlGov snapshot
+        run: |
+          python -m fencha build-parlgov \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01
+      - name: Validate real dataset floor
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("data/processed/parlgov_leader_exit_180d.manifest.json")
+              .read_text(encoding="utf-8")
+          )
+          assert manifest["forecast_cases"] >= 500, manifest
+          assert len(manifest["countries"]) >= 20, manifest
+          assert 0 < manifest["positive_cases"] < manifest["forecast_cases"], manifest
+          assert 0 < manifest["base_rate"] < 1, manifest
+          print(json.dumps(manifest, indent=2, ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parlgov-leader-exit-180d
+          path: |
+            data/processed/parlgov_leader_exit_180d.jsonl
+            data/processed/parlgov_leader_exit_180d.manifest.json
+          retention-days: 30
