@@ -7,6 +7,8 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .benchmark import temporal_holdout_benchmark
+from .caseio import read_jsonl
 from .datasets.parlgov import (
     BUILDER_VERSION,
     PARLGOV_CSV_URL,
@@ -18,6 +20,7 @@ from .datasets.parlgov import (
     write_jsonl,
 )
 from .demo import run_demo
+from .engine import AnalogForecaster
 
 
 def _date(value: str) -> date:
@@ -72,6 +75,45 @@ def build_parser() -> argparse.ArgumentParser:
         type=_date,
         default=date(1945, 1, 1),
         help="earliest monthly forecast cutoff",
+    )
+
+    benchmark = subparsers.add_parser(
+        "benchmark",
+        help="compare the analog model with a smoothed historical base rate",
+    )
+    benchmark.add_argument(
+        "--cases",
+        default="data/processed/parlgov_leader_exit_180d.jsonl",
+        help="historical case JSONL file",
+    )
+    benchmark.add_argument(
+        "--holdout-start",
+        type=_date,
+        default=date(2015, 1, 1),
+        help="first date of the chronological holdout block",
+    )
+    benchmark.add_argument(
+        "--minimum-training-cases",
+        type=int,
+        default=500,
+        help="minimum resolved historical cases required before forecasting",
+    )
+    benchmark.add_argument(
+        "--target-stride",
+        type=int,
+        default=3,
+        help="evaluate every Nth monthly target per country",
+    )
+    benchmark.add_argument(
+        "--max-history",
+        type=int,
+        default=5000,
+        help="maximum most-recent eligible cases used for each prediction",
+    )
+    benchmark.add_argument(
+        "--output",
+        default="data/processed/parlgov_benchmark.json",
+        help="benchmark report path",
     )
     return parser
 
@@ -145,12 +187,58 @@ def _build_parlgov(args: argparse.Namespace) -> str:
     )
 
 
+def _benchmark(args: argparse.Namespace) -> str:
+    cases = read_jsonl(args.cases)
+    model = AnalogForecaster(
+        feature_weights={
+            "country_code": 0.25,
+            "tenure_days": 2.0,
+            "cabinet_age_days": 0.75,
+            "coalition_size": 0.5,
+            "caretaker": 1.5,
+            "cabinet_type": 0.75,
+            "election_age_days": 1.25,
+            "government_seat_share": 1.25,
+            "minority_government": 1.0,
+        },
+        prior_strength=8.0,
+        top_k=50,
+    )
+    report = temporal_holdout_benchmark(
+        cases,
+        model,
+        holdout_start=datetime.combine(
+            args.holdout_start,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ),
+        minimum_training_cases=args.minimum_training_cases,
+        target_stride=args.target_stride,
+        max_history=args.max_history,
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    return (
+        f"predictions={report.analog.predictions} "
+        f"baseline_brier={report.baseline.brier_score:.6f} "
+        f"analog_brier={report.analog.brier_score:.6f} "
+        f"brier_skill={report.analog_brier_skill:.6f} output={output}"
+    )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "demo":
         print(run_demo(args.database))
     elif args.command == "build-parlgov":
         print(_build_parlgov(args))
+    elif args.command == "benchmark":
+        print(_benchmark(args))
 
 
 if __name__ == "__main__":
