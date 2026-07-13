@@ -1,0 +1,25 @@
+{
+  "case_id": "country-x-leader-exit-2025-01",
+  "domain": "political_stability",
+  "question": "Will the head of government leave office within 180 days?",
+  "cutoff_at": "2025-01-01T00:00:00+00:00",
+  "resolved_at": "2025-06-30T00:00:00+00:00",
+  "outcome": false,
+  "features": {
+    "approval": {
+      "value": 0.37,
+      "kind": "numeric",
+      "observed_at": "2024-12-28T00:00:00+00:00"
+    },
+    "coalition_majority": {
+      "value": false,
+      "kind": "boolean",
+      "observed_at": "2024-12-20T00:00:00+00:00"
+    },
+    "constitutional_system": {
+      "value": "parliamentary",
+      "kind": "categorical",
+      "observed_at": "2020-01-01T00:00:00+00:00"
+    }
+  }
+}
