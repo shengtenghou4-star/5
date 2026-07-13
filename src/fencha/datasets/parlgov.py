@@ -13,7 +13,9 @@ from typing import Iterable, Iterator, Mapping, Sequence, TextIO
 
 from fencha.models import FeatureValue, HistoricalCase
 
-PARLGOV_CSV_URL = "https://www.parlgov.org/data/parlgov-development_csv-utf-8.zip"
+PARLGOV_CSV_URL = (
+    "https://parlgov.org/data/parlgov-development_csv-utf-8/view_cabinet.csv"
+)
 BUILDER_VERSION = "parlgov-leader-exit-v1"
 UTC = timezone.utc
 
@@ -57,7 +59,12 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "parliament_seats": ("seats_total", "parliament_seats", "total_seats"),
     "party_seats": ("seats", "party_seats"),
     "party_id": ("party_id", "cabinet_party_id"),
-    "cabinet_member": ("cabinet_party", "cabinet_member", "government_party"),
+    "cabinet_member": (
+        "cabinet",
+        "cabinet_party",
+        "cabinet_member",
+        "government_party",
+    ),
     "caretaker": ("caretaker", "caretaker_status"),
     "cabinet_type": ("cabinet_type", "type"),
 }
@@ -154,7 +161,8 @@ def _aggregate_rows(rows: Sequence[Mapping[str, str]]) -> list[CabinetRecord]:
                 "country_code": country_code,
                 "country_name": _value(row, "country_name") or country_code,
                 "cabinet_name": cabinet_name,
-                "leader_name": _value(row, "leader_name") or infer_leader_name(cabinet_name),
+                "leader_name": _value(row, "leader_name")
+                or infer_leader_name(cabinet_name),
                 "start_date": start,
                 "end_date": _parse_date(_value(row, "end_date")),
                 "election_date": _parse_date(_value(row, "election_date")),
@@ -235,7 +243,12 @@ def build_leader_exit_cases(
             leader_key = cabinet.leader_name.casefold().strip()
             if current and leader_key != current_leader:
                 spells.append(
-                    (current[0].leader_name, current[0].start_date, cabinet.start_date, current)
+                    (
+                        current[0].leader_name,
+                        current[0].start_date,
+                        cabinet.start_date,
+                        current,
+                    )
                 )
                 current = []
             if not current:
@@ -263,12 +276,16 @@ def build_leader_exit_cases(
                 assert resolved is not None
                 observed_at = _at_utc(cutoff)
                 features: dict[str, FeatureValue] = {
-                    "country_code": FeatureValue(country_code, observed_at, "categorical"),
+                    "country_code": FeatureValue(
+                        country_code, observed_at, "categorical"
+                    ),
                     "tenure_days": FeatureValue(
                         float((cutoff - spell_start).days), observed_at, "numeric"
                     ),
                     "cabinet_age_days": FeatureValue(
-                        float((cutoff - current_cabinet.start_date).days), observed_at, "numeric"
+                        float((cutoff - current_cabinet.start_date).days),
+                        observed_at,
+                        "numeric",
                     ),
                     "coalition_size": FeatureValue(
                         float(current_cabinet.coalition_size), observed_at, "numeric"
@@ -280,7 +297,10 @@ def build_leader_exit_cases(
                         current_cabinet.cabinet_type, observed_at, "categorical"
                     ),
                 }
-                if current_cabinet.election_date and current_cabinet.election_date <= cutoff:
+                if (
+                    current_cabinet.election_date
+                    and current_cabinet.election_date <= cutoff
+                ):
                     features["election_age_days"] = FeatureValue(
                         float((cutoff - current_cabinet.election_date).days),
                         observed_at,
