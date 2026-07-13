@@ -1,0 +1,104 @@
+name: M2 GDELT pilot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/fencha/datasets/gdelt.py"
+      - "src/fencha/m2.py"
+      - "src/fencha/m2_cli.py"
+      - "tests/test_gdelt.py"
+      - "tests/test_m2.py"
+      - ".github/workflows/m2-gdelt-pilot.yml"
+
+jobs:
+  gdelt-signal-pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[dev]'
+      - run: pytest -q
+
+      - name: Rebuild ParlGov outcome table
+        run: |
+          python -m fencha build-parlgov \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01
+
+      - name: Build sampled GDELT features
+        run: |
+          python -m fencha.m2_cli build \
+            --start 2020-01-05 \
+            --end 2023-01-01 \
+            --every-days 7 \
+            --hour 12 \
+            --workers 6 \
+            --max-missing-rate 0.15
+
+      - name: Validate M2 dataset
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("data/processed/gdelt_weekly_manifest.json")
+              .read_text(encoding="utf-8")
+          )
+          assert manifest["requested_files"] >= 150, manifest
+          assert manifest["downloaded_files"] >= 130, manifest
+          assert manifest["missing_rate"] <= 0.15, manifest
+          assert manifest["enriched_cases"] >= 900, manifest
+          assert len(manifest["countries"]) >= 30, manifest
+          assert len(manifest["features"]) >= 18, manifest
+          print(json.dumps({
+              key: manifest[key]
+              for key in (
+                  "requested_files", "downloaded_files", "missing_files",
+                  "missing_rate", "downloaded_bytes", "enriched_cases",
+                  "positive_cases", "base_rate", "countries", "features"
+              )
+          }, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Compare structure and news signals
+        run: |
+          python -m fencha.m2_cli compare \
+            --holdout-start 2022-01-01 \
+            --minimum-training-cases 300 \
+            --target-stride 1 \
+            --max-history 3000
+
+      - name: Validate comparison report
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m2_gdelt_comparison.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["predictions"] >= 200, report
+          for model in ("baseline", "structure_analog", "gdelt_analog"):
+              assert report[model]["predictions"] == report["predictions"], report
+              for metric in ("brier_score", "log_loss", "calibration_error"):
+                  assert math.isfinite(report[model][metric]), report
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m2-gdelt-pilot
+          path: |
+            data/processed/gdelt_weekly_country_slices.jsonl
+            data/processed/gdelt_weekly_manifest.json
+            data/processed/parlgov_gdelt_weekly.jsonl
+            data/processed/m2_gdelt_comparison.json
+          retention-days: 30
