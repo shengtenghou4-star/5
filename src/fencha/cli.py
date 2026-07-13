@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .benchmark import temporal_holdout_benchmark
 from .caseio import read_jsonl
@@ -47,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parlgov.add_argument(
         "--source",
         default=PARLGOV_CSV_URL,
-        help="official ParlGov ZIP URL or a local ZIP/CSV path",
+        help="official ParlGov view_cabinet.csv URL or a local ZIP/CSV path",
     )
     parlgov.add_argument(
         "--work-dir",
@@ -146,9 +147,16 @@ def _build_parlgov(args: argparse.Namespace) -> str:
         else:
             csv_path = source_path
     else:
-        archive_path = work_dir / "parlgov-development_csv-utf-8.zip"
-        snapshot = download_snapshot(args.source, archive_path)
-        csv_path = extract_view_cabinet(archive_path, work_dir / "view_cabinet.csv")
+        remote_suffix = Path(urlparse(args.source).path).suffix.lower()
+        if remote_suffix == ".zip":
+            archive_path = work_dir / "parlgov-source.zip"
+            snapshot = download_snapshot(args.source, archive_path)
+            csv_path = extract_view_cabinet(
+                archive_path, work_dir / "view_cabinet.csv"
+            )
+        else:
+            csv_path = work_dir / "view_cabinet.csv"
+            snapshot = download_snapshot(args.source, csv_path)
 
     cabinets = read_cabinets(csv_path)
     cases = build_leader_exit_cases(
