@@ -6,14 +6,17 @@ on:
     branches: [main]
     paths:
       - "src/fencha/datasets/**"
+      - "src/fencha/benchmark.py"
+      - "src/fencha/caseio.py"
       - "src/fencha/cli.py"
       - "tests/test_parlgov.py"
+      - "tests/test_benchmark.py"
       - ".github/workflows/build-historical-dataset.yml"
 
 jobs:
   parlgov-leader-exit:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,10 +45,35 @@ jobs:
           assert 0 < manifest["base_rate"] < 1, manifest
           print(json.dumps(manifest, indent=2, ensure_ascii=False))
           PY
+      - name: Run chronological holdout benchmark
+        run: |
+          python -m fencha benchmark \
+            --holdout-start 2015-01-01 \
+            --minimum-training-cases 500 \
+            --target-stride 3 \
+            --max-history 5000
+      - name: Validate benchmark output
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/parlgov_benchmark.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["analog"]["predictions"] >= 100, report
+          for model in ("baseline", "analog"):
+              for metric in ("brier_score", "log_loss", "calibration_error"):
+                  assert math.isfinite(report[model][metric]), report
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: parlgov-leader-exit-180d
           path: |
             data/processed/parlgov_leader_exit_180d.jsonl
             data/processed/parlgov_leader_exit_180d.manifest.json
+            data/processed/parlgov_benchmark.json
           retention-days: 30
