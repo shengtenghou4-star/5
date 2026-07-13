@@ -12,6 +12,7 @@
 - **概率评分**：Brier score、log loss、分箱校准误差。
 - **预测账本**：问题、证据、概率版本和结算均追加保存；更新不会覆盖旧预测。
 - **首个真实数据构造器**：把 ParlGov 内阁史转成“政府首脑未来 180 天是否离任”的月度历史预测截面。
+- **时间盲测基准**：让历史类比模型与平滑基础率在后期样本上逐点对打，并计算 Brier skill。
 - **领域无关**：同一套结构可承载地缘政治、宏观经济、职业选择、升学、企业经营与体育问题。
 
 ## 核心原则
@@ -47,9 +48,9 @@ python -m fencha build-parlgov
 
 默认命令会：
 
-1. 下载官方 ParlGov CSV 压缩包；
-2. 保存原始快照并计算 SHA-256；
-3. 聚合同一内阁的执政党和席位；
+1. 下载官方 `view_cabinet.csv`；
+2. 保存原始 CSV 快照并计算 SHA-256；
+3. 按官方 `cabinet` 标记聚合同一内阁的执政党和席位；
 4. 合并同一首相连续领导的多届内阁；
 5. 生成月度预测截面和 180 天标签；
 6. 删除观察窗口尚未完整结束的右删失样本；
@@ -58,20 +59,31 @@ python -m fencha build-parlgov
 默认输出：
 
 ```text
-data/raw/parlgov/
+data/raw/parlgov/view_cabinet.csv
 data/processed/parlgov_leader_exit_180d.jsonl
 data/processed/parlgov_leader_exit_180d.manifest.json
 ```
 
-可以用本地快照复现：
+可以用本地 CSV 或 ZIP 快照复现：
 
 ```bash
 python -m fencha build-parlgov \
-  --source data/raw/parlgov/parlgov-development_csv-utf-8.zip \
+  --source data/raw/parlgov/view_cabinet.csv \
   --as-of 2023-06-30
 ```
 
 当前结构特征包括：任期长度、当前内阁年龄、距上次选举天数、联合政府党数、看守政府状态、内阁类型、执政席位占比和少数政府标记。
+
+## 运行冻结时间盲测
+
+```bash
+python -m fencha benchmark \
+  --holdout-start 2015-01-01 \
+  --minimum-training-cases 500 \
+  --target-stride 3
+```
+
+盲测中的每个目标只允许读取当时已经结算的旧案例。后期盲测案例在结算之后可以进入更晚预测的训练集，这与系统真实上线后的扩展窗口运行方式一致。输出同时包含基础率和历史类比模型的 Brier、log loss、校准误差与类比模型 Brier skill。
 
 ## 训练闭环
 
