@@ -1,0 +1,221 @@
+name: M3.4 event-clustered path audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m3-4-event-cluster-audit.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m3-4-event-cluster-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore ParlGov source cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw/parlgov
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
+
+      - name: Install and test
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Build competing-risk cases
+        run: |
+          python -m fencha.m3_competing_cli build \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01 \
+            --horizons 30,90,180,365 \
+            --election-window-days 120 \
+            --download-timeout 120 \
+            --download-retries 3
+
+      - name: Run event-clustered audit
+        run: |
+          python -m fencha.m3_4_event_audit_cli \
+            --holdout-start 2015-01-01 \
+            --horizons 30,90,180,365 \
+            --mechanisms post_election_transition,other_recorded_transition \
+            --minimum-training-cases 500 \
+            --minimum-exit-events 20 \
+            --max-history 3000 \
+            --top-k 50 \
+            --prior-strength 8 \
+            --minimum-similarity 0.05 \
+            --numeric-scale iqr \
+            --bootstrap-replicates 5000 \
+            --bootstrap-seed 20260715
+
+      - name: Validate audit
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_4_event_path_audit.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["horizons"] == [30, 90, 180, 365], report
+          assert report["model_names"] == [
+              "conditioned_snapshots",
+              "event_balanced",
+          ], report
+          assert report["unique_exit_events"] >= 10, report
+          assert report["selected_event_horizon_predictions"] >= report["unique_exit_events"], report
+          assert report["candidate_exit_predictions"] >= report["selected_event_horizon_predictions"], report
+          assert len(report["predictions"]) == report["selected_event_horizon_predictions"], report
+          assert len(report["horizons_detail"]) == 4, report
+          assert len(report["models"]) == 2, report
+          for section in [report["baseline"], *[item["metrics"] for item in report["models"]]]:
+              for key in ("brier_score", "log_loss", "accuracy"):
+                  assert math.isfinite(section[key]), (key, section[key])
+          for model in report["models"]:
+              for key in (
+                  "brier_improvement",
+                  "log_loss_improvement",
+                  "accuracy_improvement",
+              ):
+                  assert math.isfinite(model[key]), (key, model[key])
+              for key in (
+                  "brier_improvement_ci95",
+                  "log_loss_improvement_ci95",
+                  "accuracy_improvement_ci95",
+              ):
+                  assert model[key]["low"] <= model[key]["high"], model[key]
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Publish audit result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_4_event_path_audit.json")
+              .read_text(encoding="utf-8")
+          )
+          model_rows = []
+          for item in report["models"]:
+              metrics = item["metrics"]
+              brier_ci = item["brier_improvement_ci95"]
+              log_ci = item["log_loss_improvement_ci95"]
+              acc_ci = item["accuracy_improvement_ci95"]
+              model_rows.append(
+                  f"| {item['model']} | {metrics['brier_score']:.6f} | "
+                  f"{item['brier_improvement']:.6f} "
+                  f"[{brier_ci['low']:.6f}, {brier_ci['high']:.6f}] | "
+                  f"{metrics['log_loss']:.6f} | {item['log_loss_improvement']:.6f} "
+                  f"[{log_ci['low']:.6f}, {log_ci['high']:.6f}] | "
+                  f"{metrics['accuracy']:.2%} | {item['accuracy_improvement']:.2%} "
+                  f"[{acc_ci['low']:.2%}, {acc_ci['high']:.2%}] | "
+                  f"{item['countries_with_brier_improvement']}/{item['countries_evaluated']} |"
+              )
+          horizon_rows = []
+          for horizon in report["horizons_detail"]:
+              models = {item['model']: item for item in horizon['models']}
+              conditioned = models['conditioned_snapshots']['metrics']
+              balanced = models['event_balanced']['metrics']
+              horizon_rows.append(
+                  f"| {horizon['horizon_days']} | {horizon['unique_events']} | "
+                  f"{horizon['baseline']['accuracy']:.2%} | "
+                  f"{conditioned['accuracy']:.2%} | {balanced['accuracy']:.2%} | "
+                  f"{horizon['baseline']['brier_score']:.6f} | "
+                  f"{conditioned['brier_score']:.6f} | {balanced['brier_score']:.6f} |"
+              )
+          baseline = report["baseline"]
+          text = f"""# M3.4 Event-Clustered Path Audit Result
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          ## Evidence status
+
+          Exploratory robustness audit on the existing 2015+ period. Repeated monthly snapshots of one transition are collapsed, each exit event has equal overall weight, and confidence intervals resample whole events.
+
+          ## Independent evidence units
+
+          - Candidate exit predictions before deduplication: {report['candidate_exit_predictions']}
+          - Selected event-horizon predictions: {report['selected_event_horizon_predictions']}
+          - Unique leader-exit events: {report['unique_exit_events']}
+          - Countries represented: {report['countries']}
+          - Bootstrap repetitions: {report['bootstrap_replicates']}
+          - Selection: {report['selection_rule']}
+
+          ## Event-macro baseline
+
+          - Brier: {baseline['brier_score']:.6f}
+          - Log loss: {baseline['log_loss']:.6f}
+          - Accuracy: {baseline['accuracy']:.2%}
+
+          ## Model comparison
+
+          Positive improvement means the model beats the historical path mix. Confidence intervals are clustered by unique exit event.
+
+          | Model | Brier | Brier improvement [95% CI] | Log loss | Log-loss improvement [95% CI] | Accuracy | Accuracy improvement [95% CI] | Countries with Brier gain |
+          |---|---:|---:|---:|---:|---:|---:|---:|
+          {chr(10).join(model_rows)}
+
+          ## Fixed-lead horizon results
+
+          | Horizon | Unique events | Baseline accuracy | M3.3 accuracy | Event-balanced accuracy | Baseline Brier | M3.3 Brier | Event-balanced Brier |
+          |---:|---:|---:|---:|---:|---:|---:|---:|
+          {chr(10).join(horizon_rows)}
+
+          This audit is designed to reveal whether the earlier 81% path accuracy survives removal of duplicated political events. It is not a new untouched holdout.
+          """
+          lines = [
+              line[10:] if line.startswith("          ") else line
+              for line in text.splitlines()
+          ]
+          Path("docs/M3_4_EVENT_CLUSTER_AUDIT_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M3_4_EVENT_CLUSTER_AUDIT_RESULT.md
+          if git diff --cached --quiet; then
+            echo "Audit result unchanged"
+          else
+            git commit -m "Record M3.4 event-cluster audit [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-4-event-cluster-audit
+          path: |
+            data/processed/parlgov_leader_competing_risks.manifest.json
+            data/processed/m3_4_event_path_audit.json
+          if-no-files-found: ignore
+          retention-days: 30
