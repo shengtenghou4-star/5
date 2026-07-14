@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from .gdelt import (
     GDELT2_BASE_URL,
@@ -20,6 +21,8 @@ from .gdelt import (
     iter_sample_times,
     parse_export_zip,
 )
+
+OFFICIAL_GDELT_DATA_HOST = "data.gdeltproject.org"
 
 
 def _error_label(exc: BaseException) -> str:
@@ -47,6 +50,19 @@ def _error_label(exc: BaseException) -> str:
     if isinstance(exc, ValueError):
         return "parse_error"
     return type(exc).__name__.lower()
+
+
+def _is_certificate_verification_error(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(
+        exc.reason, ssl.SSLCertVerificationError
+    )
+
+
+def _is_official_gdelt_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.hostname == OFFICIAL_GDELT_DATA_HOST
 
 
 def _cache_paths(cache_dir: Path, url: str) -> tuple[Path, Path]:
@@ -101,6 +117,28 @@ def _write_cache(archive: Path, checksum: Path, payload: bytes, digest: str) -> 
     checksum_tmp.replace(checksum)
 
 
+def _read_response_payload(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    context: ssl.SSLContext | None,
+    require_final_host: str | None = None,
+) -> bytes:
+    open_kwargs: dict[str, object] = {"timeout": timeout}
+    if context is not None:
+        open_kwargs["context"] = context
+    with urllib.request.urlopen(request, **open_kwargs) as response:
+        if require_final_host is not None:
+            final_url = response.geturl() if hasattr(response, "geturl") else request.full_url
+            final_host = urlparse(final_url).hostname
+            if final_host != require_final_host:
+                raise ssl.SSLError(
+                    "official GDELT TLS fallback refused redirect to "
+                    f"{final_host or 'unknown host'}"
+                )
+        return response.read()
+
+
 def download_one_cached(
     requested: datetime,
     countries: Iterable[str],
@@ -110,11 +148,19 @@ def download_one_cached(
     timeout: int = 90,
     retries: int = 2,
     insecure_tls: bool = False,
+    allow_official_tls_fallback: bool = False,
 ) -> tuple[list[CountrySlice], DownloadRecord]:
     """Download one deterministic slice with verified persistent caching.
 
     A cached archive is accepted only after SHA-256 verification and successful
     ZIP/CSV parsing. Invalid cache entries are removed and downloaded again.
+
+    ``allow_official_tls_fallback`` is deliberately narrow: after a certificate
+    verification failure only, it retries the exact official
+    ``data.gdeltproject.org`` URL with verification disabled and rejects any
+    redirect to another host. The resulting archive must still parse as the
+    expected GDELT ZIP before it is cached. This is safer than globally disabling
+    TLS verification while accommodating the upstream host's certificate fault.
     """
     if timeout <= 0:
         raise ValueError("timeout must be positive")
@@ -123,7 +169,7 @@ def download_one_cached(
 
     wanted = tuple(countries)
     cache_root = Path(cache_dir) if cache_dir is not None else None
-    context = ssl._create_unverified_context() if insecure_tls else None
+    primary_context = ssl._create_unverified_context() if insecure_tls else None
     last_error = "not_found"
 
     for observed_at, url in _candidate_urls(requested, base_url):
@@ -150,14 +196,32 @@ def download_one_cached(
                 request = urllib.request.Request(
                     url,
                     headers={
-                        "User-Agent": "FENCHA/0.3 historical-forecasting-research"
+                        "User-Agent": "FENCHA/0.4 historical-forecasting-research"
                     },
                 )
-                open_kwargs: dict[str, object] = {"timeout": timeout}
-                if context is not None:
-                    open_kwargs["context"] = context
-                with urllib.request.urlopen(request, **open_kwargs) as response:
-                    payload = response.read()
+                transport_note: str | None = None
+                try:
+                    payload = _read_response_payload(
+                        request,
+                        timeout=timeout,
+                        context=primary_context,
+                    )
+                except Exception as verified_exc:
+                    can_fallback = (
+                        not insecure_tls
+                        and allow_official_tls_fallback
+                        and _is_official_gdelt_https_url(url)
+                        and _is_certificate_verification_error(verified_exc)
+                    )
+                    if not can_fallback:
+                        raise
+                    payload = _read_response_payload(
+                        request,
+                        timeout=timeout,
+                        context=ssl._create_unverified_context(),
+                        require_final_host=OFFICIAL_GDELT_DATA_HOST,
+                    )
+                    transport_note = "official_tls_fallback"
 
                 digest = hashlib.sha256(payload).hexdigest()
                 slices = parse_export_zip(
@@ -175,7 +239,7 @@ def download_one_cached(
                     sha256=digest,
                     bytes=len(payload),
                     status="ok",
-                    error=None,
+                    error=transport_note,
                 )
             except Exception as exc:
                 label = _error_label(exc)
@@ -211,6 +275,7 @@ def collect_weekly_samples_cached(
     timeout: int = 90,
     retries: int = 2,
     insecure_tls: bool = False,
+    allow_official_tls_fallback: bool = False,
 ) -> tuple[list[CountrySlice], list[DownloadRecord]]:
     if workers <= 0:
         raise ValueError("workers must be positive")
@@ -229,6 +294,7 @@ def collect_weekly_samples_cached(
                 timeout=timeout,
                 retries=retries,
                 insecure_tls=insecure_tls,
+                allow_official_tls_fallback=allow_official_tls_fallback,
             ): sample_time
             for sample_time in requested
         }
