@@ -51,6 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--timeout", type=int, default=90)
     build.add_argument("--retries", type=int, default=2)
     build.add_argument("--insecure-tls", action="store_true")
+    build.add_argument(
+        "--allow-official-tls-fallback",
+        action="store_true",
+        help=(
+            "after an official data.gdeltproject.org certificate-verification "
+            "failure only, retry that exact host without certificate verification"
+        ),
+    )
     build.add_argument("--max-missing-rate", type=float, default=0.15)
     build.add_argument(
         "--output",
@@ -122,10 +130,14 @@ def _build(args: argparse.Namespace) -> str:
         timeout=args.timeout,
         retries=args.retries,
         insecure_tls=args.insecure_tls,
+        allow_official_tls_fallback=args.allow_official_tls_fallback,
     )
     downloaded = [record for record in downloads if record.status == "ok"]
     missing = [record for record in downloads if record.status != "ok"]
     cache_hits = sum(record.error == "cache_hit" for record in downloaded)
+    tls_fallbacks = sum(
+        record.error == "official_tls_fallback" for record in downloaded
+    )
     missing_rate = len(missing) / len(downloads) if downloads else 1.0
 
     manifest: dict[str, object] = {
@@ -142,6 +154,8 @@ def _build(args: argparse.Namespace) -> str:
         "timeout_seconds": args.timeout,
         "retries": args.retries,
         "insecure_tls": args.insecure_tls,
+        "allow_official_tls_fallback": args.allow_official_tls_fallback,
+        "official_tls_fallbacks": tls_fallbacks,
         "max_missing_rate": args.max_missing_rate,
         "requested_files": len(downloads),
         "downloaded_files": len(downloaded),
@@ -158,8 +172,8 @@ def _build(args: argparse.Namespace) -> str:
     _write_manifest(args.manifest, manifest)
     print(
         f"GDELT downloads: requested={len(downloads)} ok={len(downloaded)} "
-        f"cache_hits={cache_hits} missing={len(missing)} "
-        f"missing_rate={missing_rate:.1%} "
+        f"cache_hits={cache_hits} tls_fallbacks={tls_fallbacks} "
+        f"missing={len(missing)} missing_rate={missing_rate:.1%} "
         f"errors={manifest['error_summary']}",
         flush=True,
     )
@@ -201,8 +215,8 @@ def _build(args: argparse.Namespace) -> str:
     _write_manifest(args.manifest, manifest)
     return (
         f"requested={len(downloads)} downloaded={len(downloaded)} "
-        f"cache_hits={cache_hits} missing={len(missing)} "
-        f"slices={sample_rows} cases={case_rows} "
+        f"cache_hits={cache_hits} tls_fallbacks={tls_fallbacks} "
+        f"missing={len(missing)} slices={sample_rows} cases={case_rows} "
         f"countries={len(enriched_countries)} output={args.output}"
     )
 
