@@ -37,17 +37,33 @@ def mechanism_horizon(domain: str | None, *, domain_prefix: str) -> int:
     return horizon
 
 
+def _tagged_total_exit(case: HistoricalCase) -> bool | None:
+    values = [tag.split(":", 1)[1] for tag in case.tags if tag.startswith("total_exit:")]
+    if not values:
+        return None
+    if len(values) != 1 or values[0] not in {"0", "1"}:
+        raise ValueError(f"invalid total_exit tag on case {case.case_id}")
+    total_exit = values[0] == "1"
+    if case.outcome and not total_exit:
+        raise ValueError(
+            f"positive mechanism case cannot have total_exit:0: {case.case_id}"
+        )
+    return total_exit
+
+
 def is_realized_exit_case(case: HistoricalCase, *, horizon_days: int) -> bool:
     """Identify mechanism labels whose total-exit event occurred in the horizon.
 
-    A cause-specific positive is always an exit. A cause-specific negative can
-    mean either no exit or an exit through another channel. ParlGov labels resolve
-    an observed exit on its actual date, while a non-exit resolves at the horizon
-    boundary. This lets the training filter recover other-channel exits without
-    using target-time information or adding outcome fields to predictive features.
+    New competing-risk datasets carry an explicit outcome-only ``total_exit`` tag.
+    That tag correctly distinguishes an exit exactly on the horizon boundary from
+    a no-exit case that also resolves on the boundary. Older datasets fall back to
+    the conservative resolution-time rule for reproducibility.
     """
     if horizon_days <= 0:
         raise ValueError("horizon_days must be positive")
+    tagged = _tagged_total_exit(case)
+    if tagged is not None:
+        return tagged
     if case.outcome:
         return True
     horizon_end = case.cutoff_at + timedelta(days=horizon_days)

@@ -18,7 +18,7 @@ DEFAULT_MECHANISMS: tuple[str, ...] = (
     POST_ELECTION_TRANSITION,
     OTHER_RECORDED_TRANSITION,
 )
-M3_COMPETING_BUILDER_VERSION = "parlgov-leader-competing-v1"
+M3_COMPETING_BUILDER_VERSION = "parlgov-leader-competing-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +177,7 @@ def _build_mechanism_cases(
                         M3_COMPETING_BUILDER_VERSION,
                         f"horizon:{horizon}",
                         f"mechanism:{mechanism}",
+                        f"total_exit:{int(total_case.outcome)}",
                     ),
                 )
             )

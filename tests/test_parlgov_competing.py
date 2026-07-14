@@ -2,6 +2,7 @@ from datetime import date
 
 from fencha.datasets.parlgov import CabinetRecord
 from fencha.datasets.parlgov_competing import (
+    M3_COMPETING_BUILDER_VERSION,
     OTHER_RECORDED_TRANSITION,
     POST_ELECTION_TRANSITION,
     build_leader_competing_risk_cases,
@@ -53,6 +54,7 @@ def test_builder_separates_election_linked_and_other_transitions() -> None:
     assert leader_a[
         "government_leader_exit_other_recorded_transition_90d"
     ].outcome is False
+    assert all("total_exit:1" in case.tags for case in leader_a.values())
 
     leader_b = {
         case.domain: case
@@ -65,12 +67,27 @@ def test_builder_separates_election_linked_and_other_transitions() -> None:
     assert leader_b[
         "government_leader_exit_other_recorded_transition_90d"
     ].outcome is True
+    assert all("total_exit:1" in case.tags for case in leader_b.values())
+
+    leader_c = [
+        case
+        for case in cases
+        if ":Leader C:" in case.case_id and case.cutoff_at.date() <= date(2021, 9, 1)
+    ]
+    assert leader_c
+    assert all(case.outcome is False for case in leader_c)
+    assert all("total_exit:0" in case.tags for case in leader_c)
+    assert M3_COMPETING_BUILDER_VERSION in {tag for case in cases for tag in case.tags}
 
     assert all(case.resolved_at > case.cutoff_at for case in cases)
     assert all(
         feature.observed_at <= case.cutoff_at
         for case in cases
         for feature in case.features.values()
+    )
+    assert all(
+        sum(tag.startswith("total_exit:") for tag in case.tags) == 1
+        for case in cases
     )
 
 
