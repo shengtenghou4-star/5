@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from math import exp
-from statistics import fmean
-from typing import Iterable
+from statistics import fmean, quantiles
+from typing import Iterable, Literal
 
 from .models import FeatureValue, HistoricalCase, ensure_aware
+
+NumericScale = Literal["range", "iqr"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,15 +43,19 @@ class AnalogForecaster:
         prior_strength: float = 4.0,
         top_k: int = 20,
         minimum_similarity: float = 0.05,
+        numeric_scale: NumericScale = "range",
     ) -> None:
         if prior_strength <= 0:
             raise ValueError("prior_strength must be positive")
         if top_k <= 0:
             raise ValueError("top_k must be positive")
+        if numeric_scale not in {"range", "iqr"}:
+            raise ValueError("numeric_scale must be 'range' or 'iqr'")
         self.feature_weights = feature_weights or {}
         self.prior_strength = prior_strength
         self.top_k = top_k
         self.minimum_similarity = minimum_similarity
+        self.numeric_scale = numeric_scale
 
     def fit_predict(
         self,
@@ -73,7 +79,8 @@ class AnalogForecaster:
         eligible = [
             case
             for case in history
-            if case.resolved_at < target_cutoff and (domain is None or case.domain == domain)
+            if case.resolved_at < target_cutoff
+            and (domain is None or case.domain == domain)
         ]
         if not eligible:
             return ForecastResult(
@@ -141,14 +148,38 @@ class AnalogForecaster:
         for name, target_feature in target.items():
             if target_feature.kind != "numeric":
                 continue
-            values = [
+            history_values = [
                 float(case.features[name].value)
                 for case in history
                 if name in case.features and case.features[name].kind == "numeric"
             ]
-            values.append(float(target_feature.value))
-            span = max(values) - min(values) if len(values) > 1 else 0.0
-            scales[name] = max(span, 1.0)
+
+            if self.numeric_scale == "range":
+                # Preserve the original model exactly. The target is included in
+                # range scaling for backwards compatibility with M1 and M2.
+                values = [*history_values, float(target_feature.value)]
+                span = max(values) - min(values) if len(values) > 1 else 0.0
+                scales[name] = max(span, 1.0)
+                continue
+
+            # M2.1 robust scaling is computed from eligible, resolved history
+            # only. The current target may not alter its own similarity scale.
+            if len(history_values) < 2:
+                scales[name] = 1.0
+                continue
+            q1, _, q3 = quantiles(
+                history_values,
+                n=4,
+                method="inclusive",
+            )
+            iqr = q3 - q1
+            span = max(history_values) - min(history_values)
+            if iqr > 1e-12:
+                scales[name] = iqr
+            elif span > 1e-12:
+                scales[name] = span
+            else:
+                scales[name] = 1.0
         return scales
 
     def _similarity(
@@ -175,7 +206,9 @@ class AnalogForecaster:
             if weight <= 0:
                 continue
             if a.kind == "numeric":
-                distance = abs(float(a.value) - float(b.value)) / scales.get(name, 1.0)
+                distance = abs(float(a.value) - float(b.value)) / scales.get(
+                    name, 1.0
+                )
                 score = exp(-3.0 * distance)
             else:
                 score = 1.0 if a.value == b.value else 0.0
