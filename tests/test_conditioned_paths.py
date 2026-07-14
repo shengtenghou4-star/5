@@ -45,8 +45,12 @@ def _case(
     outcome: bool,
     resolution_days: int,
     domain: str = DOMAIN,
+    total_exit: bool | None = None,
 ) -> HistoricalCase:
     cutoff = datetime(2020, 1, 1, tzinfo=UTC)
+    tags = ("TST", "horizon:90", "mechanism:post_election_transition")
+    if total_exit is not None:
+        tags += (f"total_exit:{int(total_exit)}",)
     return HistoricalCase(
         case_id=name,
         domain=domain,
@@ -58,7 +62,7 @@ def _case(
             "country_code": FeatureValue("TST", cutoff, "categorical"),
             "tenure_days": FeatureValue(500.0, cutoff, "numeric"),
         },
-        tags=("TST", "horizon:90", "mechanism:post_election_transition"),
+        tags=tags,
     )
 
 
@@ -78,9 +82,21 @@ def test_conditioned_model_keeps_only_realized_exits() -> None:
         outcome=True,
         resolution_days=90,
     )
+    exact_boundary_other_path = _case(
+        "boundary-other-path",
+        outcome=False,
+        resolution_days=90,
+        total_exit=True,
+    )
 
     result = model.fit_predict(
-        [positive_path, other_path_exit, no_exit, exact_boundary_positive],
+        [
+            positive_path,
+            other_path_exit,
+            no_exit,
+            exact_boundary_positive,
+            exact_boundary_other_path,
+        ],
         target_features=features,
         target_cutoff=target_cutoff,
         domain=DOMAIN,
@@ -90,12 +106,34 @@ def test_conditioned_model_keeps_only_realized_exits() -> None:
         "positive-path",
         "other-path-exit",
         "boundary-positive",
+        "boundary-other-path",
     ]
-    assert result.effective_sample_size == pytest.approx(3.0)
-    assert result.probability == pytest.approx(3 / 5)
+    assert result.effective_sample_size == pytest.approx(4.0)
+    assert result.probability == pytest.approx(3 / 6)
 
 
-def test_exit_filter_uses_resolution_boundary_without_future_features() -> None:
+def test_explicit_total_exit_tag_resolves_boundary_ambiguity() -> None:
+    assert is_realized_exit_case(
+        _case(
+            "boundary-other",
+            outcome=False,
+            resolution_days=90,
+            total_exit=True,
+        ),
+        horizon_days=90,
+    )
+    assert not is_realized_exit_case(
+        _case(
+            "boundary-none",
+            outcome=False,
+            resolution_days=90,
+            total_exit=False,
+        ),
+        horizon_days=90,
+    )
+
+
+def test_exit_filter_falls_back_for_older_datasets() -> None:
     assert is_realized_exit_case(
         _case("other", outcome=False, resolution_days=89),
         horizon_days=90,
@@ -108,6 +146,12 @@ def test_exit_filter_uses_resolution_boundary_without_future_features() -> None:
         _case("positive", outcome=True, resolution_days=90),
         horizon_days=90,
     )
+
+
+def test_invalid_total_exit_tags_are_rejected() -> None:
+    invalid = _case("invalid", outcome=True, resolution_days=20, total_exit=False)
+    with pytest.raises(ValueError, match="positive mechanism"):
+        is_realized_exit_case(invalid, horizon_days=90)
 
 
 def test_mechanism_domain_parser_rejects_total_and_bad_domains() -> None:
