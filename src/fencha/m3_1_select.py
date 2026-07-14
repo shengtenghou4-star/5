@@ -150,7 +150,9 @@ def _selection_key(
     if config.use_context:
         active_strengths.append(config.context_strength)
     mean_strength = (
-        sum(active_strengths) / len(active_strengths) if active_strengths else float("inf")
+        sum(active_strengths) / len(active_strengths)
+        if active_strengths
+        else float("inf")
     )
     return (
         candidate.adjusted_integrated_brier,
@@ -186,7 +188,9 @@ def select_hierarchical_survival_model(
     if not normalized_horizons or any(value <= 0 for value in normalized_horizons):
         raise ValueError("horizons must contain positive values")
 
-    candidate_configs = tuple(candidates or default_candidate_configs())
+    candidate_configs = (
+        default_candidate_configs() if candidates is None else tuple(candidates)
+    )
     if not candidate_configs:
         raise ValueError("at least one hierarchy candidate is required")
     if len({(name, config) for name, config in candidate_configs}) != len(
