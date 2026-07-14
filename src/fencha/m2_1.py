@@ -3,12 +3,43 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from statistics import fmean
+from typing import Literal
 
 from .benchmark import MetricSet
-from .engine import AnalogForecaster
+from .engine import AnalogForecaster, NumericScale
 from .m2 import GDELT_WEIGHTS, STRUCTURE_WEIGHTS
 from .models import HistoricalCase, ensure_aware
 from .scoring import BacktestPoint, binary_log_loss, brier_score, calibration_error
+
+GdeltSignalFamily = Literal["none", "volume", "conflict", "tone", "all"]
+
+_VOLUME_FEATURES = {
+    name
+    for name in GDELT_WEIGHTS
+    if "events_per_sample" in name or "articles_per_sample" in name
+}
+_CONFLICT_FEATURES = {
+    name
+    for name in GDELT_WEIGHTS
+    if any(
+        token in name
+        for token in (
+            "protest_share",
+            "verbal_conflict_share",
+            "material_conflict_share",
+            "cooperation_share",
+        )
+    )
+}
+_TONE_FEATURES = {
+    name
+    for name in GDELT_WEIGHTS
+    if any(
+        token in name
+        for token in ("negative_tone_share", "avg_tone", "avg_goldstein")
+    )
+}
+_COVERAGE_FEATURES = {name for name in GDELT_WEIGHTS if "coverage" in name}
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +52,9 @@ class M21PredictionDiagnostic:
     structure_probability: float
     gdelt_probability: float
     probability_delta: float
+    structure_squared_error: float
+    gdelt_squared_error: float
+    squared_error_delta: float
     structure_effective_sample_size: float
     gdelt_effective_sample_size: float
     structure_feature_coverage: float
@@ -28,6 +62,21 @@ class M21PredictionDiagnostic:
     neighbor_overlap: float
     structure_neighbor_ids: tuple[str, ...]
     gdelt_neighbor_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class M21SubgroupReport:
+    group: str
+    predictions: int
+    positives: int
+    structure_brier: float
+    gdelt_brier: float
+    gdelt_brier_skill_vs_structure: float
+    mean_absolute_probability_delta: float
+    mean_neighbor_overlap: float
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -42,6 +91,8 @@ class M21MatchedReport:
     prior_strength: float
     minimum_similarity: float
     gdelt_multiplier: float
+    signal_family: GdeltSignalFamily
+    numeric_scale: NumericScale
     target_stride: int
     max_history: int | None
     baseline: MetricSet
@@ -53,7 +104,12 @@ class M21MatchedReport:
     gdelt_log_loss_skill_vs_structure: float
     mean_signed_probability_delta: float
     mean_absolute_probability_delta: float
+    mean_squared_error_delta: float
     mean_neighbor_overlap: float
+    mean_structure_effective_sample_size: float
+    mean_gdelt_effective_sample_size: float
+    mean_structure_feature_coverage: float
+    mean_gdelt_feature_coverage: float
     first_cutoff: str
     last_cutoff: str
     target_ids: tuple[str, ...]
@@ -74,6 +130,41 @@ def _without_gdelt(case: HistoricalCase) -> HistoricalCase:
             name: feature
             for name, feature in case.features.items()
             if not name.startswith("gdelt_")
+        },
+        tags=case.tags,
+    )
+
+
+def _family_features(signal_family: GdeltSignalFamily) -> set[str]:
+    if signal_family == "none":
+        return set()
+    if signal_family == "volume":
+        return _VOLUME_FEATURES | _COVERAGE_FEATURES
+    if signal_family == "conflict":
+        return _CONFLICT_FEATURES | _COVERAGE_FEATURES
+    if signal_family == "tone":
+        return _TONE_FEATURES | _COVERAGE_FEATURES
+    if signal_family == "all":
+        return {name for name, weight in GDELT_WEIGHTS.items() if weight > 0}
+    raise ValueError(f"unknown GDELT signal family: {signal_family}")
+
+
+def _with_signal_family(
+    case: HistoricalCase,
+    signal_family: GdeltSignalFamily,
+) -> HistoricalCase:
+    selected = _family_features(signal_family)
+    return HistoricalCase(
+        case_id=case.case_id,
+        domain=case.domain,
+        question=case.question,
+        cutoff_at=case.cutoff_at,
+        resolved_at=case.resolved_at,
+        outcome=case.outcome,
+        features={
+            name: feature
+            for name, feature in case.features.items()
+            if not name.startswith("gdelt_") or name in selected
         },
         tags=case.tags,
     )
@@ -103,6 +194,53 @@ def _neighbor_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> float:
     return 1.0 if not union else len(left_set & right_set) / len(union)
 
 
+def _subgroup_report(
+    group: str,
+    items: list[M21PredictionDiagnostic],
+) -> M21SubgroupReport:
+    structure_brier = fmean(item.structure_squared_error for item in items)
+    gdelt_brier = fmean(item.gdelt_squared_error for item in items)
+    return M21SubgroupReport(
+        group=group,
+        predictions=len(items),
+        positives=sum(item.outcome for item in items),
+        structure_brier=structure_brier,
+        gdelt_brier=gdelt_brier,
+        gdelt_brier_skill_vs_structure=_skill(gdelt_brier, structure_brier),
+        mean_absolute_probability_delta=fmean(
+            abs(item.probability_delta) for item in items
+        ),
+        mean_neighbor_overlap=fmean(item.neighbor_overlap for item in items),
+    )
+
+
+def summarize_diagnostics(
+    diagnostics: list[M21PredictionDiagnostic],
+    *,
+    minimum_group_predictions: int = 10,
+) -> dict[str, list[dict[str, object]]]:
+    if minimum_group_predictions <= 0:
+        raise ValueError("minimum_group_predictions must be positive")
+
+    countries: dict[str, list[M21PredictionDiagnostic]] = {}
+    years: dict[str, list[M21PredictionDiagnostic]] = {}
+    for item in diagnostics:
+        countries.setdefault(item.country, []).append(item)
+        years.setdefault(item.cutoff_at[:4], []).append(item)
+
+    def build(groups: dict[str, list[M21PredictionDiagnostic]]) -> list[dict[str, object]]:
+        return [
+            _subgroup_report(group, items).to_dict()
+            for group, items in sorted(groups.items())
+            if len(items) >= minimum_group_predictions
+        ]
+
+    return {
+        "by_country": build(countries),
+        "by_year": build(years),
+    }
+
+
 def compare_matched_architecture(
     cases: list[HistoricalCase],
     *,
@@ -114,11 +252,14 @@ def compare_matched_architecture(
     prior_strength: float = 8.0,
     minimum_similarity: float = 0.05,
     gdelt_multiplier: float = 1.0,
+    signal_family: GdeltSignalFamily = "all",
+    numeric_scale: NumericScale = "range",
 ) -> tuple[M21MatchedReport, list[M21PredictionDiagnostic]]:
     """Compare structure and GDELT using identical targets and hyperparameters.
 
-    This is the first M2.1 diagnostic ablation. It removes the original pilot's
-    top-k confound while preserving the frozen holdout and time-safety rules.
+    This diagnostic removes the original pilot's top-k confound. Signal-family
+    filtering prevents omitted GDELT fields from receiving the engine's implicit
+    default weight, while both models use the same numeric-scaling rule.
     """
     holdout_start = ensure_aware(holdout_start)
     if minimum_training_cases <= 0:
@@ -135,26 +276,31 @@ def compare_matched_architecture(
         raise ValueError("minimum_similarity cannot be negative")
     if gdelt_multiplier < 0:
         raise ValueError("gdelt_multiplier cannot be negative")
+    selected_features = _family_features(signal_family)
 
-    enriched = [
+    raw_enriched = [
         case
         for case in cases
         if any(name.startswith("gdelt_") for name in case.features)
     ]
-    if not enriched:
+    if not raw_enriched:
         raise ValueError("no GDELT-enriched cases were supplied")
 
-    structure_by_id = {case.case_id: _without_gdelt(case) for case in enriched}
-    if len(structure_by_id) != len(enriched):
+    enriched = [_with_signal_family(case, signal_family) for case in raw_enriched]
+    structure_by_id = {case.case_id: _without_gdelt(case) for case in raw_enriched}
+    if len(structure_by_id) != len(raw_enriched):
         raise ValueError("case_id values must be unique")
 
     gdelt_weights = {
-        name: weight * gdelt_multiplier for name, weight in GDELT_WEIGHTS.items()
+        name: weight * gdelt_multiplier
+        for name, weight in GDELT_WEIGHTS.items()
+        if name in selected_features
     }
     shared_model_args = {
         "prior_strength": prior_strength,
         "top_k": top_k,
         "minimum_similarity": minimum_similarity,
+        "numeric_scale": numeric_scale,
     }
     structure_model = AnalogForecaster(
         feature_weights=STRUCTURE_WEIGHTS,
@@ -250,6 +396,9 @@ def compare_matched_architecture(
         gdelt_neighbor_ids = tuple(
             neighbor.case_id for neighbor in gdelt_result.neighbors
         )
+        outcome_value = 1.0 if target.outcome else 0.0
+        structure_squared_error = (structure_result.probability - outcome_value) ** 2
+        gdelt_squared_error = (gdelt_result.probability - outcome_value) ** 2
         diagnostics.append(
             M21PredictionDiagnostic(
                 case_id=target.case_id,
@@ -262,6 +411,9 @@ def compare_matched_architecture(
                 probability_delta=(
                     gdelt_result.probability - structure_result.probability
                 ),
+                structure_squared_error=structure_squared_error,
+                gdelt_squared_error=gdelt_squared_error,
+                squared_error_delta=gdelt_squared_error - structure_squared_error,
                 structure_effective_sample_size=(
                     structure_result.effective_sample_size
                 ),
@@ -299,6 +451,8 @@ def compare_matched_architecture(
             prior_strength=prior_strength,
             minimum_similarity=minimum_similarity,
             gdelt_multiplier=gdelt_multiplier,
+            signal_family=signal_family,
+            numeric_scale=numeric_scale,
             target_stride=target_stride,
             max_history=max_history,
             baseline=baseline_metrics,
@@ -318,8 +472,23 @@ def compare_matched_architecture(
             ),
             mean_signed_probability_delta=fmean(deltas),
             mean_absolute_probability_delta=fmean(abs(value) for value in deltas),
+            mean_squared_error_delta=fmean(
+                item.squared_error_delta for item in diagnostics
+            ),
             mean_neighbor_overlap=fmean(
                 item.neighbor_overlap for item in diagnostics
+            ),
+            mean_structure_effective_sample_size=fmean(
+                item.structure_effective_sample_size for item in diagnostics
+            ),
+            mean_gdelt_effective_sample_size=fmean(
+                item.gdelt_effective_sample_size for item in diagnostics
+            ),
+            mean_structure_feature_coverage=fmean(
+                item.structure_feature_coverage for item in diagnostics
+            ),
+            mean_gdelt_feature_coverage=fmean(
+                item.gdelt_feature_coverage for item in diagnostics
             ),
             first_cutoff=diagnostics[0].cutoff_at,
             last_cutoff=diagnostics[-1].cutoff_at,
