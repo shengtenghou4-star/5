@@ -1,0 +1,187 @@
+name: M2.1 locked pre-holdout selection
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m2-1-select.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m2-1-selection
+  cancel-in-progress: true
+
+jobs:
+  select-and-evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore historical source cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw/parlgov
+            data/cache/gdelt
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
+
+      - name: Install and test
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Rebuild ParlGov cases
+        run: |
+          python -m fencha build-parlgov \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01 \
+            --download-timeout 120 \
+            --download-retries 3
+
+      - name: Build sampled GDELT features
+        run: |
+          python -m fencha.m2_cli build \
+            --start 2020-01-05 \
+            --end 2023-01-01 \
+            --every-days 7 \
+            --hour 12 \
+            --workers 3 \
+            --timeout 90 \
+            --retries 2 \
+            --max-missing-rate 0.15
+
+      - name: Select on pre-2022 data and evaluate 2022+ once
+        run: |
+          python -m fencha.m2_1_select_cli \
+            --validation-start 2021-01-01 \
+            --validation-end 2022-01-01 \
+            --holdout-start 2022-01-01 \
+            --minimum-training-cases 150 \
+            --validation-target-stride 2 \
+            --holdout-target-stride 1 \
+            --max-history 3000 \
+            --top-k-candidates 25,50,75 \
+            --numeric-scale-candidates range,iqr \
+            --signal-family-candidates volume,conflict,tone,all \
+            --gdelt-multiplier-candidates 0.1,0.25,0.5,1.0
+
+      - name: Validate locked selection
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          selection = json.loads(
+              Path("data/processed/m2_1_selection_report.json")
+              .read_text(encoding="utf-8")
+          )
+          final = selection["final_holdout"]
+          assert selection["validation_end"] <= selection["holdout_start"], selection
+          assert len(selection["structure_candidates"]) == 6, selection
+          assert len(selection["gdelt_candidates"]) == 16, selection
+          assert final["predictions"] >= 200, final
+          assert final["top_k"] == selection["selected_top_k"], selection
+          assert final["numeric_scale"] == selection["selected_numeric_scale"], selection
+          assert final["signal_family"] == selection["selected_signal_family"], selection
+          assert final["gdelt_multiplier"] == selection["selected_gdelt_multiplier"], selection
+          assert len(final["target_ids"]) == final["predictions"], final
+          for model in ("baseline", "structure_analog", "gdelt_analog"):
+              assert final[model]["predictions"] == final["predictions"], final
+              for metric in ("brier_score", "log_loss", "calibration_error"):
+                  assert math.isfinite(final[model][metric]), final
+          print(json.dumps(selection, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Publish locked result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          selection = json.loads(
+              Path("data/processed/m2_1_selection_report.json")
+              .read_text(encoding="utf-8")
+          )
+          chosen = selection["selected_validation_candidate"]
+          final = selection["final_holdout"]
+          s = final["structure_analog"]
+          g = final["gdelt_analog"]
+          text = f"""# M2.1 Locked Selection Result
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          ## Pre-holdout selection
+
+          - Validation period: {selection['validation_start']} to {selection['validation_end']}
+          - Structure candidates: {len(selection['structure_candidates'])}
+          - GDELT candidates: {len(selection['gdelt_candidates'])}
+          - Selected top_k: {selection['selected_top_k']}
+          - Selected numeric scale: {selection['selected_numeric_scale']}
+          - Selected signal family: {selection['selected_signal_family']}
+          - Selected GDELT multiplier: {selection['selected_gdelt_multiplier']}
+          - Validation Brier skill vs matched structure: {chosen['gdelt_brier_skill_vs_structure']:.6f}
+
+          ## Locked 2022+ holdout
+
+          - Predictions: {final['predictions']}
+          - Positive cases: {final['positives']}
+
+          | Model | Brier | Log loss | Calibration error |
+          |---|---:|---:|---:|
+          | Structure only | {s['brier_score']:.6f} | {s['log_loss']:.6f} | {s['calibration_error']:.6f} |
+          | Selected structure + GDELT | {g['brier_score']:.6f} | {g['log_loss']:.6f} | {g['calibration_error']:.6f} |
+
+          - Holdout Brier skill vs matched structure: {final['gdelt_brier_skill_vs_structure']:.6f}
+          - Holdout log-loss skill vs matched structure: {final['gdelt_log_loss_skill_vs_structure']:.6f}
+          - Mean absolute probability change: {final['mean_absolute_probability_delta']:.6f}
+          - Mean neighbor overlap: {final['mean_neighbor_overlap']:.6f}
+
+          This is the locked M2.1 follow-up. It does not alter the frozen M2 result.
+          """
+          lines = [line[10:] if line.startswith("          ") else line for line in text.splitlines()]
+          Path("docs/M2_1_SELECTED_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n", encoding="utf-8"
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M2_1_SELECTED_RESULT.md
+          if git diff --cached --quiet; then
+            echo "Locked result unchanged"
+          else
+            git commit -m "Record locked M2.1 result [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m2-1-locked-selection
+          path: |
+            data/processed/parlgov_leader_exit_180d.manifest.json
+            data/processed/gdelt_weekly_manifest.json
+            data/processed/m2_1_selection_report.json
+            data/processed/m2_1_selected_holdout_report.json
+            data/processed/m2_1_selected_diagnostics.jsonl
+            data/processed/m2_1_selected_subgroups.json
+          if-no-files-found: ignore
+          retention-days: 30
