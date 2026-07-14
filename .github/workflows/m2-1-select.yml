@@ -60,6 +60,7 @@ jobs:
             --workers 3 \
             --timeout 90 \
             --retries 2 \
+            --allow-official-tls-fallback \
             --max-missing-rate 0.15
 
       - name: Select on pre-2022 data and evaluate 2022+ once
