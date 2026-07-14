@@ -2,15 +2,10 @@ name: M2 GDELT pilot
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "src/fencha/datasets/gdelt.py"
-      - "src/fencha/m2.py"
-      - "src/fencha/m2_cli.py"
-      - "tests/test_gdelt.py"
-      - "tests/test_m2.py"
-      - ".github/workflows/m2-gdelt-pilot.yml"
+
+concurrency:
+  group: m2-gdelt-pilot
+  cancel-in-progress: true
 
 jobs:
   gdelt-signal-pilot:
