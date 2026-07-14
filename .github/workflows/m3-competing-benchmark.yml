@@ -1,0 +1,235 @@
+name: M3 competing-risk benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m3-competing-benchmark.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m3-competing-benchmark
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore ParlGov source cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw/parlgov
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
+
+      - name: Install and test
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Build competing-risk ParlGov cases
+        run: |
+          python -m fencha.m3_competing_cli build \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01 \
+            --horizons 30,90,180,365 \
+            --election-window-days 120 \
+            --download-timeout 120 \
+            --download-retries 3
+
+      - name: Run chronological competing-risk benchmark
+        run: |
+          python -m fencha.m3_competing_benchmark_cli \
+            --holdout-start 2015-01-01 \
+            --horizons 30,90,180,365 \
+            --mechanisms post_election_transition,other_recorded_transition \
+            --minimum-training-cases 500 \
+            --target-stride 3 \
+            --max-history 3000 \
+            --top-k 50 \
+            --prior-strength 8 \
+            --minimum-similarity 0.05 \
+            --numeric-scale iqr
+
+      - name: Validate report
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_competing_benchmark.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["horizons"] == [30, 90, 180, 365], report
+          assert report["mechanisms"] == [
+              "other_recorded_transition",
+              "post_election_transition",
+          ], report
+          assert report["snapshots"] >= 300, report
+          assert report["exit_observations"] > 0, report
+          assert len(report["snapshot_ids"]) == report["snapshots"], report
+          assert len(report["horizon_metrics"]) == 4, report
+          assert report["max_baseline_conservation_error"] < 1e-9, report
+          assert report["max_adjusted_conservation_error"] < 1e-9, report
+          scalar_keys = (
+              "baseline_integrated_total_brier",
+              "adjusted_integrated_total_brier",
+              "total_brier_skill_vs_baseline",
+              "baseline_integrated_mechanism_brier",
+              "adjusted_integrated_mechanism_brier",
+              "mechanism_brier_skill_vs_baseline",
+              "baseline_conditional_brier",
+              "adjusted_conditional_brier",
+              "conditional_brier_skill_vs_baseline",
+              "baseline_conditional_log_loss",
+              "adjusted_conditional_log_loss",
+              "conditional_log_loss_skill_vs_baseline",
+              "baseline_conditional_accuracy",
+              "adjusted_conditional_accuracy",
+          )
+          for key in scalar_keys:
+              assert math.isfinite(report[key]), (key, report[key])
+          for item in report["horizon_metrics"]:
+              assert item["snapshots"] == report["snapshots"], item
+              assert len(item["mechanisms"]) == 2, item
+              for model in ("baseline_total", "adjusted_total"):
+                  assert item[model]["predictions"] == report["snapshots"], item
+                  for metric in ("brier_score", "log_loss", "calibration_error"):
+                      assert math.isfinite(item[model][metric]), item
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Publish benchmark result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_competing_benchmark.json")
+              .read_text(encoding="utf-8")
+          )
+          rows = []
+          for item in report["horizon_metrics"]:
+              rows.append(
+                  f"| {item['horizon_days']} | {item['snapshots']} | {item['exits']} | "
+                  f"{item['baseline_total']['brier_score']:.6f} | "
+                  f"{item['adjusted_total']['brier_score']:.6f} | "
+                  f"{item['baseline_mean_mechanism_brier']:.6f} | "
+                  f"{item['adjusted_mean_mechanism_brier']:.6f} | "
+                  f"{item['baseline_conditional']['log_loss']:.6f} | "
+                  f"{item['adjusted_conditional']['log_loss']:.6f} | "
+                  f"{item['adjusted_conditional']['accuracy']:.2%} |"
+              )
+          mechanism_rows = []
+          for item in report["horizon_metrics"]:
+              for mechanism in item["mechanisms"]:
+                  mechanism_rows.append(
+                      f"| {item['horizon_days']} | {mechanism['mechanism']} | "
+                      f"{mechanism['positives']} | "
+                      f"{mechanism['baseline']['brier_score']:.6f} | "
+                      f"{mechanism['adjusted_model']['brier_score']:.6f} | "
+                      f"{mechanism['brier_skill_vs_baseline']:.6f} |"
+                  )
+          text = f"""# M3 Competing-Risk Benchmark Result
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          ## Evaluation
+
+          - Holdout start: {report['holdout_start']}
+          - Complete evaluated snapshots: {report['snapshots']}
+          - Exit observations across horizons: {report['exit_observations']}
+          - Horizons: {report['horizons']}
+          - Mechanisms: {report['mechanisms']}
+          - Target stride: {report['target_stride']}
+          - Minimum resolved training cases per domain: {report['minimum_training_cases']}
+
+          ## Integrated scores
+
+          - Total Brier, baseline: {report['baseline_integrated_total_brier']:.6f}
+          - Total Brier, adjusted model: {report['adjusted_integrated_total_brier']:.6f}
+          - Total Brier skill: {report['total_brier_skill_vs_baseline']:.6f}
+          - Mechanism Brier, baseline: {report['baseline_integrated_mechanism_brier']:.6f}
+          - Mechanism Brier, adjusted model: {report['adjusted_integrated_mechanism_brier']:.6f}
+          - Mechanism Brier skill: {report['mechanism_brier_skill_vs_baseline']:.6f}
+
+          ## Conditional path choice among exits
+
+          - Baseline conditional Brier: {report['baseline_conditional_brier']:.6f}
+          - Adjusted conditional Brier: {report['adjusted_conditional_brier']:.6f}
+          - Conditional Brier skill: {report['conditional_brier_skill_vs_baseline']:.6f}
+          - Baseline conditional log loss: {report['baseline_conditional_log_loss']:.6f}
+          - Adjusted conditional log loss: {report['adjusted_conditional_log_loss']:.6f}
+          - Conditional log-loss skill: {report['conditional_log_loss_skill_vs_baseline']:.6f}
+          - Baseline top-path accuracy: {report['baseline_conditional_accuracy']:.2%}
+          - Adjusted top-path accuracy: {report['adjusted_conditional_accuracy']:.2%}
+
+          ## Coherence
+
+          - Maximum baseline conservation error: {report['max_baseline_conservation_error']:.12f}
+          - Maximum adjusted conservation error: {report['max_adjusted_conservation_error']:.12f}
+
+          ## Horizon summary
+
+          | Horizon | Snapshots | Exits | Baseline total Brier | Model total Brier | Baseline path Brier | Model path Brier | Baseline conditional log loss | Model conditional log loss | Model path accuracy |
+          |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+          {chr(10).join(rows)}
+
+          ## Mechanism detail
+
+          | Horizon | Mechanism | Positives | Baseline Brier | Model Brier | Brier skill |
+          |---:|---|---:|---:|---:|---:|
+          {chr(10).join(mechanism_rows)}
+
+          Negative skill remains a valid result. Conditional scores prevent the rarity of leader exits from hiding weak transition-path forecasts.
+          """
+          lines = [
+              line[10:] if line.startswith("          ") else line
+              for line in text.splitlines()
+          ]
+          Path("docs/M3_COMPETING_BENCHMARK_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M3_COMPETING_BENCHMARK_RESULT.md
+          if git diff --cached --quiet; then
+            echo "Benchmark result unchanged"
+          else
+            git commit -m "Record M3 competing-risk benchmark [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-competing-benchmark
+          path: |
+            data/processed/parlgov_leader_competing_risks.manifest.json
+            data/processed/m3_competing_benchmark.json
+          if-no-files-found: ignore
+          retention-days: 30
