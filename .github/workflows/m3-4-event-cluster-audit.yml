@@ -54,6 +54,7 @@ jobs:
         id: audit
         continue-on-error: true
         run: |
+          set -o pipefail
           mkdir -p data/processed
           python -m fencha.m3_4_event_audit_cli \
             --holdout-start 2015-01-01 \
@@ -61,7 +62,7 @@ jobs:
             --mechanisms post_election_transition,other_recorded_transition \
             --minimum-training-cases 500 \
             --minimum-exit-events 20 \
-            --max-history 3000 \
+            --max-history 0 \
             --top-k 50 \
             --prior-strength 8 \
             --minimum-similarity 0.05 \
