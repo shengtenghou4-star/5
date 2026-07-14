@@ -11,12 +11,44 @@ from .m2 import GDELT_WEIGHTS, STRUCTURE_WEIGHTS
 from .models import HistoricalCase, ensure_aware
 from .scoring import BacktestPoint, binary_log_loss, brier_score, calibration_error
 
-GdeltSignalFamily = Literal["none", "volume", "conflict", "tone", "all"]
+GdeltSignalFamily = Literal[
+    "none",
+    "volume",
+    "raw_volume",
+    "log_volume",
+    "anomaly",
+    "conflict",
+    "tone",
+    "all",
+]
 
-_VOLUME_FEATURES = {
+# M2.1-specific additions. The frozen M2 weights remain unchanged in m2.py.
+M21_GDELT_WEIGHTS = {
+    **GDELT_WEIGHTS,
+    "gdelt_log_events_per_sample_30d": 0.35,
+    "gdelt_log_articles_per_sample_30d": 0.35,
+    "gdelt_log_events_per_sample_90d": 0.25,
+    "gdelt_log_articles_per_sample_90d": 0.25,
+    "gdelt_anomaly_log_events_per_sample_30d": 0.75,
+    "gdelt_anomaly_log_articles_per_sample_30d": 0.75,
+    "gdelt_anomaly_log_events_per_sample_90d": 0.50,
+    "gdelt_anomaly_log_articles_per_sample_90d": 0.50,
+}
+
+_RAW_VOLUME_FEATURES = {
     name
     for name in GDELT_WEIGHTS
     if "events_per_sample" in name or "articles_per_sample" in name
+}
+_LOG_VOLUME_FEATURES = {
+    name
+    for name in M21_GDELT_WEIGHTS
+    if name.startswith("gdelt_log_")
+}
+_ANOMALY_FEATURES = {
+    name
+    for name in M21_GDELT_WEIGHTS
+    if name.startswith("gdelt_anomaly_")
 }
 _CONFLICT_FEATURES = {
     name
@@ -138,14 +170,26 @@ def _without_gdelt(case: HistoricalCase) -> HistoricalCase:
 def _family_features(signal_family: GdeltSignalFamily) -> set[str]:
     if signal_family == "none":
         return set()
-    if signal_family == "volume":
-        return _VOLUME_FEATURES | _COVERAGE_FEATURES
+    if signal_family in {"volume", "raw_volume"}:
+        return _RAW_VOLUME_FEATURES | _COVERAGE_FEATURES
+    if signal_family == "log_volume":
+        return _LOG_VOLUME_FEATURES | _COVERAGE_FEATURES
+    if signal_family == "anomaly":
+        return _ANOMALY_FEATURES | _COVERAGE_FEATURES
     if signal_family == "conflict":
         return _CONFLICT_FEATURES | _COVERAGE_FEATURES
     if signal_family == "tone":
         return _TONE_FEATURES | _COVERAGE_FEATURES
     if signal_family == "all":
-        return {name for name, weight in GDELT_WEIGHTS.items() if weight > 0}
+        # Raw and log volumes encode the same quantity. The combined model uses
+        # the stabilized log representation plus country anomalies, not both.
+        return (
+            _LOG_VOLUME_FEATURES
+            | _ANOMALY_FEATURES
+            | _CONFLICT_FEATURES
+            | _TONE_FEATURES
+            | _COVERAGE_FEATURES
+        )
     raise ValueError(f"unknown GDELT signal family: {signal_family}")
 
 
@@ -293,7 +337,7 @@ def compare_matched_architecture(
 
     gdelt_weights = {
         name: weight * gdelt_multiplier
-        for name, weight in GDELT_WEIGHTS.items()
+        for name, weight in M21_GDELT_WEIGHTS.items()
         if name in selected_features
     }
     shared_model_args = {

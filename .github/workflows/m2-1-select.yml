@@ -74,7 +74,7 @@ jobs:
             --max-history 3000 \
             --top-k-candidates 25,50,75 \
             --numeric-scale-candidates range,iqr \
-            --signal-family-candidates volume,conflict,tone,all \
+            --signal-family-candidates raw_volume,log_volume,anomaly,conflict,tone,all \
             --gdelt-multiplier-candidates 0.1,0.25,0.5,1.0
 
       - name: Validate locked selection
@@ -89,9 +89,10 @@ jobs:
               .read_text(encoding="utf-8")
           )
           final = selection["final_holdout"]
+          assert selection["feature_version"] == "m2.1-time-safe-news-volume-v1", selection
           assert selection["validation_end"] <= selection["holdout_start"], selection
           assert len(selection["structure_candidates"]) == 6, selection
-          assert len(selection["gdelt_candidates"]) == 16, selection
+          assert len(selection["gdelt_candidates"]) == 24, selection
           assert final["predictions"] >= 200, final
           assert final["top_k"] == selection["selected_top_k"], selection
           assert final["numeric_scale"] == selection["selected_numeric_scale"], selection
@@ -128,6 +129,7 @@ jobs:
 
           ## Pre-holdout selection
 
+          - Feature version: {selection['feature_version']}
           - Validation period: {selection['validation_start']} to {selection['validation_end']}
           - Structure candidates: {len(selection['structure_candidates'])}
           - GDELT candidates: {len(selection['gdelt_candidates'])}

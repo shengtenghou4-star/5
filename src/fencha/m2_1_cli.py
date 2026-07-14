@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .caseio import read_jsonl
 from .m2_1 import compare_matched_architecture, summarize_diagnostics
+from .m2_1_features import add_time_safe_volume_features
 
 
 def _date(value: str) -> date:
@@ -39,7 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gdelt-multiplier", type=float, default=1.0)
     parser.add_argument(
         "--signal-family",
-        choices=("none", "volume", "conflict", "tone", "all"),
+        choices=(
+            "none",
+            "volume",
+            "raw_volume",
+            "log_volume",
+            "anomaly",
+            "conflict",
+            "tone",
+            "all",
+        ),
         default="all",
     )
     parser.add_argument(
@@ -69,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    cases = read_jsonl(args.cases)
+    cases = add_time_safe_volume_features(read_jsonl(args.cases))
     report, diagnostics = compare_matched_architecture(
         cases,
         holdout_start=datetime.combine(

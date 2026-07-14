@@ -11,6 +11,7 @@ from .m2_1 import (
     M21PredictionDiagnostic,
     compare_matched_architecture,
 )
+from .m2_1_features import M21_FEATURE_VERSION, add_time_safe_volume_features
 from .models import HistoricalCase, ensure_aware
 
 
@@ -36,6 +37,7 @@ class M21ValidationCandidate:
 
 @dataclass(frozen=True, slots=True)
 class M21SelectionReport:
+    feature_version: str
     validation_start: str
     validation_end: str
     holdout_start: str
@@ -112,7 +114,9 @@ def select_and_evaluate(
     top_k_candidates: Iterable[int] = (25, 50, 75),
     numeric_scale_candidates: Iterable[NumericScale] = ("range", "iqr"),
     signal_family_candidates: Iterable[GdeltSignalFamily] = (
-        "volume",
+        "raw_volume",
+        "log_volume",
+        "anomaly",
         "conflict",
         "tone",
         "all",
@@ -125,6 +129,7 @@ def select_and_evaluate(
 
     Selection sees only cases with cutoffs strictly before ``validation_end``.
     The 2022+ holdout is not used to choose any hyperparameter or signal family.
+    Log-volume and country-anomaly features use only earlier same-country cutoffs.
     """
     validation_start = ensure_aware(validation_start)
     validation_end = ensure_aware(validation_end)
@@ -145,8 +150,11 @@ def select_and_evaluate(
     if any(value <= 0 for value in multipliers):
         raise ValueError("GDELT multiplier candidates must be positive")
 
+    enhanced_cases = add_time_safe_volume_features(cases)
     validation_cases = [
-        case for case in cases if ensure_aware(case.cutoff_at) < validation_end
+        case
+        for case in enhanced_cases
+        if ensure_aware(case.cutoff_at) < validation_end
     ]
     if not validation_cases:
         raise ValueError("no cases exist before validation_end")
@@ -201,7 +209,7 @@ def select_and_evaluate(
     selected_gdelt = min(gdelt_candidates, key=_gdelt_key)
 
     final_report, final_diagnostics = compare_matched_architecture(
-        cases,
+        enhanced_cases,
         holdout_start=holdout_start,
         minimum_training_cases=minimum_training_cases,
         target_stride=holdout_target_stride,
@@ -216,6 +224,7 @@ def select_and_evaluate(
 
     return (
         M21SelectionReport(
+            feature_version=M21_FEATURE_VERSION,
             validation_start=validation_start.isoformat(),
             validation_end=validation_end.isoformat(),
             holdout_start=holdout_start.isoformat(),

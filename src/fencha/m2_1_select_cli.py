@@ -72,7 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--signal-family-candidates",
         type=_csv_strings,
-        default=("volume", "conflict", "tone", "all"),
+        default=(
+            "raw_volume",
+            "log_volume",
+            "anomaly",
+            "conflict",
+            "tone",
+            "all",
+        ),
     )
     parser.add_argument(
         "--gdelt-multiplier-candidates",
@@ -169,6 +176,7 @@ def main() -> None:
 
     final = selection.final_holdout
     print(
+        f"feature_version={selection.feature_version} "
         f"selected_top_k={selection.selected_top_k} "
         f"selected_scale={selection.selected_numeric_scale} "
         f"selected_family={selection.selected_signal_family} "
