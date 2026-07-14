@@ -23,6 +23,10 @@ def _cases() -> list[HistoricalCase]:
             "country_code": FeatureValue("GBR", cutoff, "categorical"),
             "tenure_days": FeatureValue(float(index * 30), cutoff, "numeric"),
             "cabinet_age_days": FeatureValue(float(index * 20), cutoff, "numeric"),
+            # These are diagnostics only and must never receive the engine's
+            # implicit default weight.
+            "gdelt_samples_30d": FeatureValue(float(2 + index % 4), cutoff, "numeric"),
+            "gdelt_samples_90d": FeatureValue(float(7 + index % 6), cutoff, "numeric"),
             "gdelt_protest_share_30d": FeatureValue(
                 0.4 if outcome else 0.05, cutoff, "numeric"
             ),
