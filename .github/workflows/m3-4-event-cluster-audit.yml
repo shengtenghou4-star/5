@@ -51,7 +51,10 @@ jobs:
             --download-retries 3
 
       - name: Run event-clustered audit
+        id: audit
+        continue-on-error: true
         run: |
+          mkdir -p data/processed
           python -m fencha.m3_4_event_audit_cli \
             --holdout-start 2015-01-01 \
             --horizons 30,90,180,365 \
@@ -64,9 +67,11 @@ jobs:
             --minimum-similarity 0.05 \
             --numeric-scale iqr \
             --bootstrap-replicates 5000 \
-            --bootstrap-seed 20260715
+            --bootstrap-seed 20260715 \
+            2>&1 | tee data/processed/m3_4_event_path_audit.log
 
       - name: Validate audit
+        if: steps.audit.outcome == 'success'
         run: |
           python - <<'PY'
           import json
@@ -108,6 +113,7 @@ jobs:
           PY
 
       - name: Publish audit result
+        if: steps.audit.outcome == 'success'
         env:
           SOURCE_SHA: ${{ github.sha }}
         run: |
@@ -210,6 +216,54 @@ jobs:
             git push origin HEAD:main
           fi
 
+      - name: Publish failure diagnostics
+        if: steps.audit.outcome == 'failure'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          log_path = Path("data/processed/m3_4_event_path_audit.log")
+          lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+          manifest_path = Path("data/processed/parlgov_leader_competing_risks.manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          tail = "\n".join(lines[-120:])
+          text = f"""# M3.4 Event-Cluster Audit Diagnostics
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          - Audit status: failure
+          - Forecast cases built: {manifest.get('forecast_cases')}
+          - Leader spells: {manifest.get('leader_spells')}
+          - Recorded transition counts: {manifest.get('recorded_transitions_by_mechanism')}
+
+          ## Audit log tail
+
+          ```text
+          {tail}
+          ```
+          """
+          cleaned = [
+              line[10:] if line.startswith("          ") else line
+              for line in text.splitlines()
+          ]
+          Path("docs/M3_4_EVENT_CLUSTER_AUDIT_DIAGNOSTICS.md").write_text(
+              "\n".join(cleaned).strip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M3_4_EVENT_CLUSTER_AUDIT_DIAGNOSTICS.md
+          git commit -m "Record M3.4 audit diagnostics [skip ci]"
+          git push origin HEAD:main
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -217,5 +271,10 @@ jobs:
           path: |
             data/processed/parlgov_leader_competing_risks.manifest.json
             data/processed/m3_4_event_path_audit.json
+            data/processed/m3_4_event_path_audit.log
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Fail after publishing diagnostics
+        if: steps.audit.outcome == 'failure'
+        run: exit 1
