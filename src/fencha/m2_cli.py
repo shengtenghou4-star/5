@@ -11,10 +11,10 @@ from .caseio import read_jsonl
 from .datasets.gdelt import (
     BUILDER_VERSION,
     GDELT2_BASE_URL,
-    collect_weekly_samples,
     enrich_cases,
     write_samples,
 )
+from .datasets.gdelt_download import collect_weekly_samples_cached
 from .datasets.parlgov import write_jsonl
 from .m2 import compare_structure_and_gdelt
 
@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--hour", type=int, default=12)
     build.add_argument("--workers", type=int, default=3)
     build.add_argument("--base-url", default=GDELT2_BASE_URL)
+    build.add_argument("--cache-dir", default="data/cache/gdelt")
+    build.add_argument("--timeout", type=int, default=90)
+    build.add_argument("--retries", type=int, default=2)
+    build.add_argument("--insecure-tls", action="store_true")
     build.add_argument("--max-missing-rate", type=float, default=0.15)
     build.add_argument(
         "--output",
@@ -98,14 +102,15 @@ def _error_summary(downloads: list[object]) -> dict[str, int]:
         if status == "ok":
             continue
         error = getattr(record, "error", None) or status
-        errors[str(error)] += 1
+        category = str(error).split(":", 1)[0]
+        errors[category] += 1
     return dict(errors.most_common())
 
 
 def _build(args: argparse.Namespace) -> str:
     cases = read_jsonl(args.cases)
     countries = sorted({case.tags[0] for case in cases if case.tags})
-    slices, downloads = collect_weekly_samples(
+    slices, downloads = collect_weekly_samples_cached(
         start=args.start,
         end=args.end,
         countries=countries,
@@ -113,9 +118,14 @@ def _build(args: argparse.Namespace) -> str:
         hour=args.hour,
         workers=args.workers,
         base_url=args.base_url,
+        cache_dir=args.cache_dir,
+        timeout=args.timeout,
+        retries=args.retries,
+        insecure_tls=args.insecure_tls,
     )
     downloaded = [record for record in downloads if record.status == "ok"]
     missing = [record for record in downloads if record.status != "ok"]
+    cache_hits = sum(record.error == "cache_hit" for record in downloaded)
     missing_rate = len(missing) / len(downloads) if downloads else 1.0
 
     manifest: dict[str, object] = {
@@ -123,14 +133,20 @@ def _build(args: argparse.Namespace) -> str:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "status": "downloads_complete",
         "base_url": args.base_url,
+        "cache_dir": str(Path(args.cache_dir)),
         "start": args.start.isoformat(),
         "end": args.end.isoformat(),
         "every_days": args.every_days,
         "hour_utc": args.hour,
         "workers": args.workers,
+        "timeout_seconds": args.timeout,
+        "retries": args.retries,
+        "insecure_tls": args.insecure_tls,
         "max_missing_rate": args.max_missing_rate,
         "requested_files": len(downloads),
         "downloaded_files": len(downloaded),
+        "cache_hits": cache_hits,
+        "network_downloads": len(downloaded) - cache_hits,
         "missing_files": len(missing),
         "missing_rate": missing_rate,
         "downloaded_bytes": sum(record.bytes for record in downloaded),
@@ -142,7 +158,8 @@ def _build(args: argparse.Namespace) -> str:
     _write_manifest(args.manifest, manifest)
     print(
         f"GDELT downloads: requested={len(downloads)} ok={len(downloaded)} "
-        f"missing={len(missing)} missing_rate={missing_rate:.1%} "
+        f"cache_hits={cache_hits} missing={len(missing)} "
+        f"missing_rate={missing_rate:.1%} "
         f"errors={manifest['error_summary']}",
         flush=True,
     )
@@ -184,7 +201,8 @@ def _build(args: argparse.Namespace) -> str:
     _write_manifest(args.manifest, manifest)
     return (
         f"requested={len(downloads)} downloaded={len(downloaded)} "
-        f"missing={len(missing)} slices={sample_rows} cases={case_rows} "
+        f"cache_hits={cache_hits} missing={len(missing)} "
+        f"slices={sample_rows} cases={case_rows} "
         f"countries={len(enriched_countries)} output={args.output}"
     )
 

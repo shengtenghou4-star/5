@@ -9,4 +9,5 @@ fencha.db
 *.sqlite3
 data/raw/
 data/processed/
+data/cache/
 .DS_Store
