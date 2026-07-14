@@ -17,7 +17,7 @@ def _month(year: int, month: int) -> datetime:
     return datetime(year, month, 1, tzinfo=UTC)
 
 
-def _cases(*, invert_holdout: bool = False) -> list[HistoricalCase]:
+def _cases(*, alternate_holdout: bool = False) -> list[HistoricalCase]:
     result: list[HistoricalCase] = []
     start = _month(2008, 1)
     for index in range(120):
@@ -26,8 +26,9 @@ def _cases(*, invert_holdout: bool = False) -> list[HistoricalCase]:
         base_exit = index % (10 if country == "A" else 6) == 0
         for horizon in HORIZONS:
             outcome = base_exit if horizon == 30 else (base_exit or index % 8 == 0)
-            if invert_holdout and cutoff >= _month(2015, 1):
-                outcome = not outcome
+            if alternate_holdout and cutoff >= _month(2015, 1):
+                short_exit = index % 5 == 0
+                outcome = short_exit if horizon == 30 else (short_exit or index % 3 == 0)
             result.append(
                 HistoricalCase(
                     case_id=f"snapshot-{index}:{horizon}d",
@@ -118,7 +119,7 @@ def test_default_grid_is_predeclared_and_unique() -> None:
 
 def test_hierarchy_selection_is_independent_of_holdout_outcomes() -> None:
     original = _select(_cases())
-    inverted = _select(_cases(invert_holdout=True))
+    alternate = _select(_cases(alternate_holdout=True))
 
     assert original.selected_template in {
         "global",
@@ -129,10 +130,12 @@ def test_hierarchy_selection_is_independent_of_holdout_outcomes() -> None:
     assert original.final_holdout.snapshots > 0
     assert len(original.final_holdout.snapshot_ids) == original.final_holdout.snapshots
 
-    assert inverted.selected_template == original.selected_template
-    assert inverted.selected_config == original.selected_config
-    assert inverted.selected_validation == original.selected_validation
-    assert inverted.final_holdout.adjusted_integrated_brier != pytest.approx(
+    # The alternate holdout remains logically monotone, but changes the final
+    # labels. It may change the final score, never the pre-2015 selection.
+    assert alternate.selected_template == original.selected_template
+    assert alternate.selected_config == original.selected_config
+    assert alternate.selected_validation == original.selected_validation
+    assert alternate.final_holdout.adjusted_integrated_brier != pytest.approx(
         original.final_holdout.adjusted_integrated_brier
     )
 
