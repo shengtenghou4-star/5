@@ -37,7 +37,7 @@ jobs:
             --end 2023-01-01 \
             --every-days 7 \
             --hour 12 \
-            --workers 6 \
+            --workers 3 \
             --max-missing-rate 0.15
 
       - name: Validate M2 dataset
@@ -57,12 +57,12 @@ jobs:
           assert len(manifest["countries"]) >= 30, manifest
           assert len(manifest["features"]) >= 18, manifest
           print(json.dumps({
-              key: manifest[key]
-              for key in (
-                  "requested_files", "downloaded_files", "missing_files",
-                  "missing_rate", "downloaded_bytes", "enriched_cases",
-                  "positive_cases", "base_rate", "countries", "features"
-              )
+            key: manifest[key]
+            for key in (
+                "requested_files", "downloaded_files", "missing_files",
+                "missing_rate", "downloaded_bytes", "enriched_cases",
+                "positive_cases", "base_rate", "countries", "features"
+            )
           }, indent=2, ensure_ascii=False))
           PY
 
@@ -93,9 +93,12 @@ jobs:
           print(json.dumps(report, indent=2, ensure_ascii=False))
           PY
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload M2 results or diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: m2-gdelt-pilot
+          if-no-files-found: warn
           path: |
             data/processed/gdelt_weekly_country_slices.jsonl
             data/processed/gdelt_weekly_manifest.json
