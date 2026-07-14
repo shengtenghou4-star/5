@@ -1,10 +1,10 @@
 # M2.1 Run Status
 
-Source commit: `e0e401c62d9684f2fa558c66f0186ff0c75e1f8a`
+Source commit: `88754fe08a90b0b813c1c78b90de86b2db292af6`
 
 - install: success
 - tests: success
-- ParlGov build: success
-- GDELT build: failure
+- ParlGov build: failure
+- GDELT build: skipped
 - matched comparison: skipped
 - validation: skipped
