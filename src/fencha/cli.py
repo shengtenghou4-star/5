@@ -15,11 +15,11 @@ from .datasets.parlgov import (
     PARLGOV_CSV_URL,
     SnapshotManifest,
     build_leader_exit_cases,
-    download_snapshot,
     extract_view_cabinet,
     read_cabinets,
     write_jsonl,
 )
+from .datasets.parlgov_download import download_snapshot_cached
 from .demo import run_demo
 from .engine import AnalogForecaster
 
@@ -54,6 +54,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--work-dir",
         default="data/raw/parlgov",
         help="directory for immutable source snapshots",
+    )
+    parlgov.add_argument(
+        "--download-timeout",
+        type=int,
+        default=120,
+        help="remote ParlGov timeout in seconds",
+    )
+    parlgov.add_argument(
+        "--download-retries",
+        type=int,
+        default=3,
+        help="number of retries after the first remote ParlGov attempt",
+    )
+    parlgov.add_argument(
+        "--refresh-source",
+        action="store_true",
+        help="ignore a validated cached ParlGov snapshot and download again",
     )
     parlgov.add_argument(
         "--output",
@@ -150,13 +167,25 @@ def _build_parlgov(args: argparse.Namespace) -> str:
         remote_suffix = Path(urlparse(args.source).path).suffix.lower()
         if remote_suffix == ".zip":
             archive_path = work_dir / "parlgov-source.zip"
-            snapshot = download_snapshot(args.source, archive_path)
+            snapshot = download_snapshot_cached(
+                args.source,
+                archive_path,
+                timeout=args.download_timeout,
+                retries=args.download_retries,
+                reuse_existing=not args.refresh_source,
+            )
             csv_path = extract_view_cabinet(
                 archive_path, work_dir / "view_cabinet.csv"
             )
         else:
             csv_path = work_dir / "view_cabinet.csv"
-            snapshot = download_snapshot(args.source, csv_path)
+            snapshot = download_snapshot_cached(
+                args.source,
+                csv_path,
+                timeout=args.download_timeout,
+                retries=args.download_retries,
+                reuse_existing=not args.refresh_source,
+            )
 
     cabinets = read_cabinets(csv_path)
     cases = build_leader_exit_cases(
