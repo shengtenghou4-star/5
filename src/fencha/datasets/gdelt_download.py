@@ -7,7 +7,8 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -16,6 +17,7 @@ from .gdelt import (
     CountrySlice,
     DownloadRecord,
     _candidate_urls,
+    iter_sample_times,
     parse_export_zip,
 )
 
@@ -26,8 +28,6 @@ def _error_label(exc: BaseException) -> str:
             return "http_404"
         if exc.code == 429:
             return "http_429"
-        if 500 <= exc.code <= 599:
-            return f"http_{exc.code}"
         return f"http_{exc.code}"
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return "timeout"
@@ -63,6 +63,7 @@ def _read_cache(
     archive: Path,
     checksum: Path,
     *,
+    requested: datetime,
     observed_at: datetime,
     url: str,
     countries: Iterable[str],
@@ -80,14 +81,13 @@ def _read_cache(
         countries,
     )
     return slices, DownloadRecord(
-        requested_at=observed_at.isoformat(),
+        requested_at=requested.isoformat(),
         observed_at=observed_at.isoformat(),
         url=url,
         sha256=digest,
         bytes=len(payload),
         status="ok",
-        error=None,
-        cache_hit=True,
+        error="cache_hit",
     )
 
 
@@ -133,22 +133,13 @@ def download_one_cached(
             archive, checksum = _cache_paths(cache_root, url)
             if archive.exists():
                 try:
-                    slices, record = _read_cache(
+                    return _read_cache(
                         archive,
                         checksum,
+                        requested=requested,
                         observed_at=observed_at,
                         url=url,
                         countries=wanted,
-                    )
-                    return slices, DownloadRecord(
-                        requested_at=requested.isoformat(),
-                        observed_at=record.observed_at,
-                        url=record.url,
-                        sha256=record.sha256,
-                        bytes=record.bytes,
-                        status=record.status,
-                        error=record.error,
-                        cache_hit=True,
                     )
                 except Exception as exc:
                     last_error = f"cache_{_error_label(exc)}: {exc}"
@@ -185,7 +176,6 @@ def download_one_cached(
                     bytes=len(payload),
                     status="ok",
                     error=None,
-                    cache_hit=False,
                 )
             except Exception as exc:
                 label = _error_label(exc)
@@ -205,5 +195,47 @@ def download_one_cached(
         bytes=0,
         status="missing",
         error=last_error,
-        cache_hit=False,
     )
+
+
+def collect_weekly_samples_cached(
+    *,
+    start: date,
+    end: date,
+    countries: Iterable[str],
+    every_days: int = 7,
+    hour: int = 12,
+    workers: int = 3,
+    base_url: str = GDELT2_BASE_URL,
+    cache_dir: str | Path | None = "data/cache/gdelt",
+    timeout: int = 90,
+    retries: int = 2,
+    insecure_tls: bool = False,
+) -> tuple[list[CountrySlice], list[DownloadRecord]]:
+    if workers <= 0:
+        raise ValueError("workers must be positive")
+    requested = iter_sample_times(start, end, every_days, hour)
+    wanted = tuple(countries)
+    slices: list[CountrySlice] = []
+    records: list[DownloadRecord] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {
+            pool.submit(
+                download_one_cached,
+                sample_time,
+                wanted,
+                base_url=base_url,
+                cache_dir=cache_dir,
+                timeout=timeout,
+                retries=retries,
+                insecure_tls=insecure_tls,
+            ): sample_time
+            for sample_time in requested
+        }
+        for future in as_completed(future_map):
+            country_slices, record = future.result()
+            slices.extend(country_slices)
+            records.append(record)
+    slices.sort(key=lambda item: (item.observed_at, item.country_code))
+    records.sort(key=lambda item: item.requested_at)
+    return slices, records
