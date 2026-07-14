@@ -1,4 +1,4 @@
-name: M2 runner smoke test
+name: Public Actions smoke test
 
 on:
   push:
@@ -7,9 +7,31 @@ on:
       - ".github/workflows/m2-smoke.yml"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Confirm runner starts
-        run: echo "M2 runner is available"
+      - uses: actions/checkout@v4
+      - name: Confirm public runner starts
+        run: echo "Public GitHub-hosted runner is available"
+      - name: Publish smoke result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          cat > docs/PUBLIC_ACTIONS_SMOKE.md <<EOF
+          # Public Actions Smoke Test
+
+          Status: success
+
+          Source commit: \`$SOURCE_SHA\`
+          EOF
+          sed -i 's/^          //' docs/PUBLIC_ACTIONS_SMOKE.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/PUBLIC_ACTIONS_SMOKE.md
+          git commit -m "Record public Actions smoke success [skip ci]"
+          git push
