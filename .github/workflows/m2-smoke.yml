@@ -1,0 +1,15 @@
+name: M2 runner smoke test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m2-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm runner starts
+        run: echo "M2 runner is available"
