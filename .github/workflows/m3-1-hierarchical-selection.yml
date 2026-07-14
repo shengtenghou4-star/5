@@ -1,0 +1,221 @@
+name: M3.1 hierarchical rare-event selection
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m3-1-hierarchical-selection.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m3-1-hierarchical-selection
+  cancel-in-progress: true
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore ParlGov source cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw/parlgov
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
+
+      - name: Install and test
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Build multi-horizon ParlGov cases
+        run: |
+          python -m fencha.m3_cli build \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01 \
+            --horizons 30,90,180,365 \
+            --download-timeout 120 \
+            --download-retries 3
+
+      - name: Select before holdout and evaluate once
+        run: |
+          python -m fencha.m3_1_select_cli \
+            --validation-start 2010-01-01 \
+            --validation-end 2015-01-01 \
+            --holdout-start 2015-01-01 \
+            --horizons 30,90,180,365 \
+            --minimum-training-cases 500 \
+            --validation-target-stride 6 \
+            --holdout-target-stride 3 \
+            --max-history 3000
+
+      - name: Validate locked selection
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_1_hierarchical_selection.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["validation_start"].startswith("2010-01-01"), report
+          assert report["validation_end"].startswith("2015-01-01"), report
+          assert report["holdout_start"].startswith("2015-01-01"), report
+          assert report["horizons"] == [30, 90, 180, 365], report
+          assert len(report["candidates"]) == 31, report
+          assert report["selected_template"], report
+          assert report["selected_validation"]["template"] == report["selected_template"], report
+          assert report["selected_validation"]["config"] == report["selected_config"], report
+          final = report["final_holdout"]
+          assert final["snapshots"] >= 300, final
+          assert len(final["snapshot_ids"]) == final["snapshots"], final
+          assert len(final["horizon_metrics"]) == 4, final
+          for key in (
+              "baseline_integrated_brier",
+              "raw_integrated_brier",
+              "adjusted_integrated_brier",
+              "adjusted_integrated_brier_skill_vs_baseline",
+              "mean_absolute_adjustment",
+          ):
+              assert math.isfinite(final[key]), (key, final[key])
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Publish selection result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_1_hierarchical_selection.json")
+              .read_text(encoding="utf-8")
+          )
+          candidates = sorted(
+              report["candidates"],
+              key=lambda item: (
+                  item["adjusted_integrated_brier"],
+                  item["raw_integrated_brier"],
+              ),
+          )
+          candidate_rows = []
+          for rank, item in enumerate(candidates[:10], start=1):
+              config = item["config"]
+              candidate_rows.append(
+                  f"| {rank} | {item['template']} | "
+                  f"{config['use_country']} | {config['use_tenure']} | "
+                  f"{config['use_context']} | {config['tenure_bucket_days']} | "
+                  f"{config['country_strength']:.0f} | "
+                  f"{config['tenure_strength']:.0f} | "
+                  f"{item['adjusted_integrated_brier']:.6f} | "
+                  f"{item['adjusted_skill_vs_baseline']:.6f} |"
+              )
+          horizon_rows = []
+          final = report["final_holdout"]
+          for item in final["horizon_metrics"]:
+              horizon_rows.append(
+                  f"| {item['horizon_days']} | {item['predictions']} | "
+                  f"{item['positives']} | {item['baseline']['brier_score']:.6f} | "
+                  f"{item['adjusted_analog']['brier_score']:.6f} | "
+                  f"{item['adjusted_analog']['log_loss']:.6f} | "
+                  f"{item['adjusted_brier_skill_vs_baseline']:.6f} |"
+              )
+          selected = report["selected_config"]
+          text = f"""# M3.1 Hierarchical Rare-Event Selection Result
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          ## Locked design
+
+          - Validation period: {report['validation_start']} to {report['validation_end']}
+          - Final holdout begins: {report['holdout_start']}
+          - Candidate specifications: {len(report['candidates'])}
+          - Validation target stride: {report['validation_target_stride']}
+          - Holdout target stride: {report['holdout_target_stride']}
+          - Minimum training cases per horizon: {report['minimum_training_cases']}
+
+          ## Selected model
+
+          - Template: `{report['selected_template']}`
+          - Use country level: {selected['use_country']}
+          - Use tenure level: {selected['use_tenure']}
+          - Use government-context level: {selected['use_context']}
+          - Tenure bucket: {selected['tenure_bucket_days']} days
+          - Country shrinkage strength: {selected['country_strength']:.0f}
+          - Tenure shrinkage strength: {selected['tenure_strength']:.0f}
+          - Context shrinkage strength: {selected['context_strength']:.0f}
+          - Validation integrated Brier: {report['selected_validation']['adjusted_integrated_brier']:.6f}
+          - Validation skill versus historical base rate: {report['selected_validation']['adjusted_skill_vs_baseline']:.6f}
+
+          ## Final 2015+ holdout
+
+          - Evaluated snapshots: {final['snapshots']}
+          - Historical base-rate integrated Brier: {final['baseline_integrated_brier']:.6f}
+          - Hierarchical raw integrated Brier: {final['raw_integrated_brier']:.6f}
+          - Hierarchical coherent integrated Brier: {final['adjusted_integrated_brier']:.6f}
+          - Hierarchical skill versus base rate: {final['adjusted_integrated_brier_skill_vs_baseline']:.6f}
+          - Raw crossing rate: {final['raw_crossing_rate']:.2%}
+          - Mean absolute coherence adjustment: {final['mean_absolute_adjustment']:.6f}
+
+          ## Holdout by horizon
+
+          | Horizon | Predictions | Positives | Baseline Brier | Hierarchical Brier | Hierarchical log loss | Brier skill |
+          |---:|---:|---:|---:|---:|---:|---:|
+          {chr(10).join(horizon_rows)}
+
+          ## Top validation candidates
+
+          | Rank | Template | Country | Tenure | Context | Tenure bucket | Country strength | Tenure strength | Integrated Brier | Skill vs baseline |
+          |---:|---|---|---|---|---:|---:|---:|---:|---:|
+          {chr(10).join(candidate_rows)}
+
+          Model selection used only pre-2015 outcomes. The final holdout score is recorded once even when it is worse than the base rate.
+          """
+          lines = [
+              line[10:] if line.startswith("          ") else line
+              for line in text.splitlines()
+          ]
+          Path("docs/M3_1_HIERARCHICAL_SELECTION_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M3_1_HIERARCHICAL_SELECTION_RESULT.md
+          if git diff --cached --quiet; then
+            echo "Selection result unchanged"
+          else
+            git commit -m "Record M3.1 hierarchical selection [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-1-hierarchical-selection
+          path: |
+            data/processed/parlgov_leader_survival.manifest.json
+            data/processed/m3_1_hierarchical_selection.json
+          if-no-files-found: ignore
+          retention-days: 30
