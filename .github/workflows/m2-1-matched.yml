@@ -5,8 +5,11 @@ on:
   push:
     branches: [main]
     paths:
+      - "src/fencha/m2.py"
       - "src/fencha/m2_1.py"
       - "src/fencha/m2_1_cli.py"
+      - "src/fencha/engine.py"
+      - "src/fencha/datasets/gdelt.py"
       - "tests/test_m2_1.py"
       - ".github/workflows/m2-1-matched.yml"
 
@@ -23,6 +26,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -100,14 +106,38 @@ jobs:
           print(json.dumps(report, indent=2, ensure_ascii=False))
           PY
 
-      - name: Write compact result back to repository
-        id: publish
-        if: steps.validate.outcome == 'success'
-        continue-on-error: true
+      - name: Publish run summary
+        if: always()
         env:
           SOURCE_SHA: ${{ github.sha }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          PARLGOV_OUTCOME: ${{ steps.parlgov.outcome }}
+          GDELT_OUTCOME: ${{ steps.gdelt.outcome }}
+          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
         run: |
-          python - <<'PY'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+
+          cat > docs/M2_1_RUN_STATUS.md <<EOF
+          # M2.1 Run Status
+
+          Source commit: \`$SOURCE_SHA\`
+
+          - install: $INSTALL_OUTCOME
+          - tests: $TESTS_OUTCOME
+          - ParlGov build: $PARLGOV_OUTCOME
+          - GDELT build: $GDELT_OUTCOME
+          - matched comparison: $COMPARE_OUTCOME
+          - validation: $VALIDATE_OUTCOME
+          EOF
+          sed -i 's/^          //' docs/M2_1_RUN_STATUS.md
+
+          if [ "$VALIDATE_OUTCOME" = "success" ]; then
+            python - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -125,88 +155,58 @@ jobs:
           g = report["gdelt_analog"]
           text = f"""# M2.1 Matched-Architecture Result
 
-Source commit: `{os.environ['SOURCE_SHA']}`
+          Source commit: `{os.environ['SOURCE_SHA']}`
 
-## Data
+          ## Data
 
-- GDELT requested: {manifest['requested_files']}
-- GDELT downloaded: {manifest['downloaded_files']}
-- GDELT missing: {manifest['missing_files']} ({manifest['missing_rate']:.2%})
-- Enriched cases: {manifest['enriched_cases']}
-- Common holdout predictions: {report['predictions']}
-- Positive holdout cases: {report['positives']}
+          - GDELT requested: {manifest['requested_files']}
+          - GDELT downloaded: {manifest['downloaded_files']}
+          - GDELT missing: {manifest['missing_files']} ({manifest['missing_rate']:.2%})
+          - Enriched cases: {manifest['enriched_cases']}
+          - Common holdout predictions: {report['predictions']}
+          - Positive holdout cases: {report['positives']}
 
-## Matched model settings
+          ## Matched model settings
 
-- top_k: {report['top_k']} for both models
-- prior_strength: {report['prior_strength']} for both models
-- minimum_similarity: {report['minimum_similarity']} for both models
-- GDELT multiplier: {report['gdelt_multiplier']}
+          - top_k: {report['top_k']} for both models
+          - prior_strength: {report['prior_strength']} for both models
+          - minimum_similarity: {report['minimum_similarity']} for both models
+          - GDELT multiplier: {report['gdelt_multiplier']}
 
-## Metrics
+          ## Metrics
 
-| Model | Brier | Log loss | Calibration error |
-|---|---:|---:|---:|
-| Base rate | {b['brier_score']:.6f} | {b['log_loss']:.6f} | {b['calibration_error']:.6f} |
-| Structure only | {s['brier_score']:.6f} | {s['log_loss']:.6f} | {s['calibration_error']:.6f} |
-| Structure + GDELT | {g['brier_score']:.6f} | {g['log_loss']:.6f} | {g['calibration_error']:.6f} |
+          | Model | Brier | Log loss | Calibration error |
+          |---|---:|---:|---:|
+          | Base rate | {b['brier_score']:.6f} | {b['log_loss']:.6f} | {b['calibration_error']:.6f} |
+          | Structure only | {s['brier_score']:.6f} | {s['log_loss']:.6f} | {s['calibration_error']:.6f} |
+          | Structure + GDELT | {g['brier_score']:.6f} | {g['log_loss']:.6f} | {g['calibration_error']:.6f} |
 
-## Diagnostics
+          ## Diagnostics
 
-- GDELT Brier skill vs structure: {report['gdelt_brier_skill_vs_structure']:.6f}
-- GDELT log-loss skill vs structure: {report['gdelt_log_loss_skill_vs_structure']:.6f}
-- Mean signed probability change: {report['mean_signed_probability_delta']:.6f}
-- Mean absolute probability change: {report['mean_absolute_probability_delta']:.6f}
-- Mean neighbor overlap: {report['mean_neighbor_overlap']:.6f}
+          - GDELT Brier skill vs structure: {report['gdelt_brier_skill_vs_structure']:.6f}
+          - GDELT log-loss skill vs structure: {report['gdelt_log_loss_skill_vs_structure']:.6f}
+          - Mean signed probability change: {report['mean_signed_probability_delta']:.6f}
+          - Mean absolute probability change: {report['mean_absolute_probability_delta']:.6f}
+          - Mean neighbor overlap: {report['mean_neighbor_overlap']:.6f}
 
-This is an M2.1 diagnostic result. It does not replace the frozen M2 pilot.
-"""
-          Path("docs/M2_1_MATCHED_RESULT.md").write_text(text, encoding="utf-8")
+          This is an M2.1 diagnostic result. It does not replace the frozen M2 pilot.
+          """
+          lines = [line[10:] if line.startswith("          ") else line for line in text.splitlines()]
+          Path("docs/M2_1_MATCHED_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n", encoding="utf-8"
+          )
           PY
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/M2_1_MATCHED_RESULT.md
-          if git diff --cached --quiet; then
-            echo "Result file unchanged"
-          else
-            git commit -m "Record M2.1 matched result [skip ci]"
-            git push
           fi
 
-      - name: Write run status back to repository
-        if: always()
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-          INSTALL_OUTCOME: ${{ steps.install.outcome }}
-          TESTS_OUTCOME: ${{ steps.tests.outcome }}
-          PARLGOV_OUTCOME: ${{ steps.parlgov.outcome }}
-          GDELT_OUTCOME: ${{ steps.gdelt.outcome }}
-          COMPARE_OUTCOME: ${{ steps.compare.outcome }}
-          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
-          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
-        run: |
-          cat > docs/M2_1_RUN_STATUS.md <<EOF
-          # M2.1 Run Status
-
-          Source commit: \`$SOURCE_SHA\`
-
-          - install: $INSTALL_OUTCOME
-          - tests: $TESTS_OUTCOME
-          - ParlGov build: $PARLGOV_OUTCOME
-          - GDELT build: $GDELT_OUTCOME
-          - matched comparison: $COMPARE_OUTCOME
-          - validation: $VALIDATE_OUTCOME
-          - result publication: $PUBLISH_OUTCOME
-          EOF
-          sed -i 's/^          //' docs/M2_1_RUN_STATUS.md
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/M2_1_RUN_STATUS.md
+          if [ -f docs/M2_1_MATCHED_RESULT.md ]; then
+            git add docs/M2_1_MATCHED_RESULT.md
+          fi
           if git diff --cached --quiet; then
-            echo "Status file unchanged"
+            echo "Summary files unchanged"
           else
-            git commit -m "Record M2.1 run status [skip ci]"
-            git push
+            git commit -m "Record M2.1 run summary [skip ci]"
+            git push origin HEAD:main
           fi
 
       - uses: actions/upload-artifact@v4
@@ -229,11 +229,9 @@ This is an M2.1 diagnostic result. It does not replace the frozen M2 pilot.
           GDELT_OUTCOME: ${{ steps.gdelt.outcome }}
           COMPARE_OUTCOME: ${{ steps.compare.outcome }}
           VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
-          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
         run: |
           for outcome in \
             "$INSTALL_OUTCOME" "$TESTS_OUTCOME" "$PARLGOV_OUTCOME" \
-            "$GDELT_OUTCOME" "$COMPARE_OUTCOME" "$VALIDATE_OUTCOME" \
-            "$PUBLISH_OUTCOME"; do
+            "$GDELT_OUTCOME" "$COMPARE_OUTCOME" "$VALIDATE_OUTCOME"; do
             test "$outcome" = "success" || exit 1
           done
