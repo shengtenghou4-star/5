@@ -1,0 +1,165 @@
+name: GDELT official TLS fallback smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/gdelt-tls-smoke.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gdelt-tls-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install and test
+        id: tests
+        continue-on-error: true
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Download three real historical slices
+        id: download
+        if: steps.tests.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir -p data/processed data/cache/gdelt-smoke
+          python - <<'PY'
+          import json
+          from dataclasses import asdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          from fencha.datasets.gdelt_download import download_one_cached
+
+          requested = [
+              datetime(2020, 1, 5, 12, tzinfo=timezone.utc),
+              datetime(2020, 1, 12, 12, tzinfo=timezone.utc),
+              datetime(2020, 1, 19, 12, tzinfo=timezone.utc),
+          ]
+          records = []
+          row_counts = []
+          for sample_time in requested:
+              slices, record = download_one_cached(
+                  sample_time,
+                  ["DEU", "FRA", "GBR"],
+                  cache_dir="data/cache/gdelt-smoke",
+                  timeout=90,
+                  retries=1,
+                  allow_official_tls_fallback=True,
+              )
+              records.append(asdict(record))
+              row_counts.append(len(slices))
+
+          payload = {
+              "requested": len(records),
+              "successful": sum(item["status"] == "ok" for item in records),
+              "official_tls_fallbacks": sum(
+                  item["error"] == "official_tls_fallback" for item in records
+              ),
+              "country_slice_rows": row_counts,
+              "records": records,
+          }
+          Path("data/processed/gdelt_tls_smoke.json").write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(payload, indent=2, ensure_ascii=False))
+          assert payload["successful"] == 3, payload
+          assert all(count >= 3 for count in row_counts), payload
+          assert all(item["sha256"] for item in records), payload
+          PY
+
+      - name: Publish smoke result
+        if: always()
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result_path = Path("data/processed/gdelt_tls_smoke.json")
+          if result_path.exists():
+              result = json.loads(result_path.read_text(encoding="utf-8"))
+              rows = [
+                  f"- requested: {result['requested']}",
+                  f"- successful: {result['successful']}",
+                  f"- restricted TLS fallbacks: {result['official_tls_fallbacks']}",
+                  f"- country slice rows: {result['country_slice_rows']}",
+                  "",
+                  "| Requested | Observed | Status | Transport | Bytes | SHA-256 |",
+                  "|---|---|---|---|---:|---|",
+              ]
+              for item in result["records"]:
+                  rows.append(
+                      f"| {item['requested_at']} | {item['observed_at']} | "
+                      f"{item['status']} | {item['error'] or 'verified_tls'} | "
+                      f"{item['bytes']} | `{item['sha256'] or ''}` |"
+                  )
+          else:
+              rows = ["No machine-readable smoke result was produced."]
+          text = "\n".join(
+              [
+                  "# GDELT TLS Smoke Result",
+                  "",
+                  f"Source commit: `{os.environ['SOURCE_SHA']}`",
+                  "",
+                  f"- tests: {os.environ['TESTS_OUTCOME']}",
+                  f"- real download: {os.environ['DOWNLOAD_OUTCOME']}",
+                  "",
+                  *rows,
+                  "",
+                  "The fallback is restricted to certificate-verification failures on the exact official `data.gdeltproject.org` host. Cross-host redirects are rejected and every payload must parse as a GDELT export ZIP before caching.",
+              ]
+          )
+          Path("docs/GDELT_TLS_SMOKE_RESULT.md").write_text(
+              text.strip() + "\n", encoding="utf-8"
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/GDELT_TLS_SMOKE_RESULT.md
+          git commit -m "Record GDELT TLS smoke result [skip ci]"
+          git push origin HEAD:main
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gdelt-tls-smoke
+          path: data/processed/gdelt_tls_smoke.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail when tests or download failed
+        if: always()
+        env:
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+        run: |
+          test "$TESTS_OUTCOME" = "success"
+          test "$DOWNLOAD_OUTCOME" = "success"
