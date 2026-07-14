@@ -32,7 +32,6 @@ jobs:
 
       - name: Build sampled GDELT features
         run: |
-          set +e
           python -m fencha.m2_cli build \
             --start 2020-01-05 \
             --end 2023-01-01 \
@@ -40,12 +39,6 @@ jobs:
             --hour 12 \
             --workers 3 \
             --max-missing-rate 0.15
-          status=$?
-          if [ -f data/processed/gdelt_weekly_manifest.json ]; then
-            echo "===== GDELT DIAGNOSTIC MANIFEST ====="
-            cat data/processed/gdelt_weekly_manifest.json
-          fi
-          exit $status
 
       - name: Validate M2 dataset
         run: |
