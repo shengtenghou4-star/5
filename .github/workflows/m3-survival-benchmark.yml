@@ -1,0 +1,184 @@
+name: M3 survival-curve benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m3-survival-benchmark.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m3-survival-benchmark
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore ParlGov source cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw/parlgov
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
+
+      - name: Install and test
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Build multi-horizon ParlGov cases
+        run: |
+          python -m fencha.m3_cli build \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01 \
+            --horizons 30,90,180,365 \
+            --download-timeout 120 \
+            --download-retries 3
+
+      - name: Run chronological survival benchmark
+        run: |
+          python -m fencha.m3_benchmark_cli \
+            --holdout-start 2015-01-01 \
+            --horizons 30,90,180,365 \
+            --minimum-training-cases 500 \
+            --target-stride 3 \
+            --max-history 3000 \
+            --top-k 50 \
+            --prior-strength 8 \
+            --minimum-similarity 0.05 \
+            --numeric-scale iqr
+
+      - name: Validate report
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_survival_benchmark.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["horizons"] == [30, 90, 180, 365], report
+          assert report["snapshots"] >= 300, report
+          assert len(report["snapshot_ids"]) == report["snapshots"], report
+          assert len(report["horizon_metrics"]) == 4, report
+          assert 0.0 <= report["raw_crossing_rate"] <= 1.0, report
+          for key in (
+              "baseline_integrated_brier",
+              "raw_integrated_brier",
+              "adjusted_integrated_brier",
+              "adjusted_integrated_brier_skill_vs_raw",
+              "mean_absolute_adjustment",
+              "mean_restricted_survival_days",
+          ):
+              assert math.isfinite(report[key]), report
+          for item in report["horizon_metrics"]:
+              assert item["predictions"] == report["snapshots"], item
+              for model in ("baseline", "raw_analog", "adjusted_analog"):
+                  assert item[model]["predictions"] == report["snapshots"], item
+                  for metric in ("brier_score", "log_loss", "calibration_error"):
+                      assert math.isfinite(item[model][metric]), item
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Publish benchmark result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_survival_benchmark.json")
+              .read_text(encoding="utf-8")
+          )
+          rows = []
+          for item in report["horizon_metrics"]:
+              b = item["baseline"]
+              r = item["raw_analog"]
+              a = item["adjusted_analog"]
+              rows.append(
+                  f"| {item['horizon_days']} | {item['predictions']} | {item['positives']} | "
+                  f"{b['brier_score']:.6f} | {r['brier_score']:.6f} | "
+                  f"{a['brier_score']:.6f} | {a['log_loss']:.6f} | "
+                  f"{a['calibration_error']:.6f} | {item['adjusted_brier_skill_vs_raw']:.6f} |"
+              )
+          text = f"""# M3 Survival-Curve Benchmark Result
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          ## Evaluation
+
+          - Holdout start: {report['holdout_start']}
+          - Complete evaluated snapshots: {report['snapshots']}
+          - Horizons: {report['horizons']}
+          - Target stride: {report['target_stride']}
+          - Minimum resolved training cases per horizon: {report['minimum_training_cases']}
+
+          ## Curve coherence
+
+          - Raw crossing curves: {report['raw_crossing_curves']} ({report['raw_crossing_rate']:.2%})
+          - Mean crossing magnitude: {report['mean_crossing_magnitude']:.6f}
+          - Mean absolute PAVA adjustment: {report['mean_absolute_adjustment']:.6f}
+          - Mean restricted survival days: {report['mean_restricted_survival_days']:.2f}
+
+          ## Integrated Brier
+
+          - Historical base rate: {report['baseline_integrated_brier']:.6f}
+          - Raw independent horizons: {report['raw_integrated_brier']:.6f}
+          - PAVA-adjusted curve: {report['adjusted_integrated_brier']:.6f}
+          - PAVA skill vs raw: {report['adjusted_integrated_brier_skill_vs_raw']:.6f}
+          - Adjusted skill vs baseline: {report['adjusted_integrated_brier_skill_vs_baseline']:.6f}
+
+          ## Horizon metrics
+
+          | Horizon | Predictions | Positives | Baseline Brier | Raw Brier | Adjusted Brier | Adjusted log loss | Adjusted calibration | PAVA skill vs raw |
+          |---:|---:|---:|---:|---:|---:|---:|---:|---:|
+          {chr(10).join(rows)}
+
+          PAVA is judged by proper scores as well as logical coherence. A negative PAVA skill remains a valid result.
+          """
+          lines = [line[10:] if line.startswith("          ") else line for line in text.splitlines()]
+          Path("docs/M3_SURVIVAL_BENCHMARK_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n", encoding="utf-8"
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M3_SURVIVAL_BENCHMARK_RESULT.md
+          if git diff --cached --quiet; then
+            echo "Benchmark result unchanged"
+          else
+            git commit -m "Record M3 survival benchmark [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-survival-benchmark
+          path: |
+            data/processed/parlgov_leader_survival.manifest.json
+            data/processed/m3_survival_benchmark.json
+          if-no-files-found: ignore
+          retention-days: 30
