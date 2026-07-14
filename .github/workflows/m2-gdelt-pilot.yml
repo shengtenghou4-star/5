@@ -32,6 +32,7 @@ jobs:
 
       - name: Build sampled GDELT features
         run: |
+          set +e
           python -m fencha.m2_cli build \
             --start 2020-01-05 \
             --end 2023-01-01 \
@@ -39,6 +40,12 @@ jobs:
             --hour 12 \
             --workers 3 \
             --max-missing-rate 0.15
+          status=$?
+          if [ -f data/processed/gdelt_weekly_manifest.json ]; then
+            echo "===== GDELT DIAGNOSTIC MANIFEST ====="
+            cat data/processed/gdelt_weekly_manifest.json
+          fi
+          exit $status
 
       - name: Validate M2 dataset
         run: |
@@ -57,12 +64,12 @@ jobs:
           assert len(manifest["countries"]) >= 30, manifest
           assert len(manifest["features"]) >= 18, manifest
           print(json.dumps({
-            key: manifest[key]
-            for key in (
-                "requested_files", "downloaded_files", "missing_files",
-                "missing_rate", "downloaded_bytes", "enriched_cases",
-                "positive_cases", "base_rate", "countries", "features"
-            )
+              key: manifest[key]
+              for key in (
+                  "requested_files", "downloaded_files", "missing_files",
+                  "missing_rate", "downloaded_bytes", "enriched_cases",
+                  "positive_cases", "base_rate", "countries", "features"
+              )
           }, indent=2, ensure_ascii=False))
           PY
 
@@ -93,12 +100,9 @@ jobs:
           print(json.dumps(report, indent=2, ensure_ascii=False))
           PY
 
-      - name: Upload M2 results or diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: m2-gdelt-pilot
-          if-no-files-found: warn
           path: |
             data/processed/gdelt_weekly_country_slices.jsonl
             data/processed/gdelt_weekly_manifest.json
