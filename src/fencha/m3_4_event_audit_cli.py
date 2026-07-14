@@ -53,7 +53,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--minimum-training-cases", type=int, default=500)
     parser.add_argument("--minimum-exit-events", type=int, default=20)
-    parser.add_argument("--max-history", type=int, default=3000)
+    parser.add_argument(
+        "--max-history",
+        type=int,
+        default=0,
+        help=(
+            "maximum resolved snapshots per mechanism domain; 0 keeps the full "
+            "history, which is the default for rare exit-event auditing"
+        ),
+    )
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--prior-strength", type=float, default=8.0)
     parser.add_argument("--minimum-similarity", type=float, default=0.05)
@@ -73,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.max_history < 0:
+        raise SystemExit("max-history must be zero or positive")
+    max_history = None if args.max_history == 0 else args.max_history
     conditioned = ExitConditionedPathForecaster(
         _analog(
             top_k=args.top_k,
@@ -104,7 +115,7 @@ def main() -> None:
         horizons=args.horizons,
         minimum_training_cases=args.minimum_training_cases,
         minimum_exit_events=args.minimum_exit_events,
-        max_history=args.max_history,
+        max_history=max_history,
         bootstrap_replicates=args.bootstrap_replicates,
         bootstrap_seed=args.bootstrap_seed,
     )
