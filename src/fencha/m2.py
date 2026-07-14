@@ -20,6 +20,10 @@ STRUCTURE_WEIGHTS = {
 }
 
 GDELT_WEIGHTS = {
+    # Sampling-count fields are diagnostics, not political signals. Explicit
+    # zeroes prevent the forecaster's default weight from activating them.
+    "gdelt_samples_30d": 0.0,
+    "gdelt_samples_90d": 0.0,
     "gdelt_events_per_sample_30d": 0.35,
     "gdelt_articles_per_sample_30d": 0.35,
     "gdelt_protest_share_30d": 1.5,
