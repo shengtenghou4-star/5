@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--end", type=_date, default=date(2023, 1, 1))
     build.add_argument("--every-days", type=int, default=7)
     build.add_argument("--hour", type=int, default=12)
-    build.add_argument("--workers", type=int, default=6)
+    build.add_argument("--workers", type=int, default=3)
     build.add_argument("--base-url", default=GDELT2_BASE_URL)
     build.add_argument("--max-missing-rate", type=float, default=0.15)
     build.add_argument(
@@ -81,6 +82,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_manifest(path: str | Path, payload: dict[str, object]) -> None:
+    manifest_path = Path(path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _error_summary(downloads: list[object]) -> dict[str, int]:
+    errors: Counter[str] = Counter()
+    for record in downloads:
+        status = getattr(record, "status", "unknown")
+        if status == "ok":
+            continue
+        error = getattr(record, "error", None) or status
+        errors[str(error)] += 1
+    return dict(errors.most_common())
+
+
 def _build(args: argparse.Namespace) -> str:
     cases = read_jsonl(args.cases)
     countries = sorted({case.tags[0] for case in cases if case.tags})
@@ -96,11 +117,44 @@ def _build(args: argparse.Namespace) -> str:
     downloaded = [record for record in downloads if record.status == "ok"]
     missing = [record for record in downloads if record.status != "ok"]
     missing_rate = len(missing) / len(downloads) if downloads else 1.0
+
+    manifest: dict[str, object] = {
+        "builder_version": BUILDER_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "downloads_complete",
+        "base_url": args.base_url,
+        "start": args.start.isoformat(),
+        "end": args.end.isoformat(),
+        "every_days": args.every_days,
+        "hour_utc": args.hour,
+        "workers": args.workers,
+        "max_missing_rate": args.max_missing_rate,
+        "requested_files": len(downloads),
+        "downloaded_files": len(downloaded),
+        "missing_files": len(missing),
+        "missing_rate": missing_rate,
+        "downloaded_bytes": sum(record.bytes for record in downloaded),
+        "error_summary": _error_summary(downloads),
+        "downloads": [asdict(record) for record in downloads],
+        "output": str(Path(args.output)),
+        "samples_output": str(Path(args.samples_output)),
+    }
+    _write_manifest(args.manifest, manifest)
+    print(
+        f"GDELT downloads: requested={len(downloads)} ok={len(downloaded)} "
+        f"missing={len(missing)} missing_rate={missing_rate:.1%} "
+        f"errors={manifest['error_summary']}",
+        flush=True,
+    )
+
     if missing_rate > args.max_missing_rate:
-        raise RuntimeError(
+        manifest["status"] = "failed_missing_rate"
+        manifest["failure_reason"] = (
             f"GDELT missing rate {missing_rate:.1%} exceeds "
             f"limit {args.max_missing_rate:.1%}"
         )
+        _write_manifest(args.manifest, manifest)
+        raise RuntimeError(str(manifest["failure_reason"]))
 
     sample_rows = write_samples(slices, args.samples_output)
     enriched = enrich_cases(cases, slices, every_days=args.every_days)
@@ -116,35 +170,18 @@ def _build(args: argparse.Namespace) -> str:
         }
     )
 
-    manifest = {
-        "builder_version": BUILDER_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "base_url": args.base_url,
-        "start": args.start.isoformat(),
-        "end": args.end.isoformat(),
-        "every_days": args.every_days,
-        "hour_utc": args.hour,
-        "requested_files": len(downloads),
-        "downloaded_files": len(downloaded),
-        "missing_files": len(missing),
-        "missing_rate": missing_rate,
-        "downloaded_bytes": sum(record.bytes for record in downloaded),
-        "country_slice_rows": sample_rows,
-        "enriched_cases": case_rows,
-        "positive_cases": positives,
-        "base_rate": positives / case_rows if case_rows else None,
-        "countries": enriched_countries,
-        "features": feature_names,
-        "downloads": [asdict(record) for record in downloads],
-        "output": str(Path(args.output)),
-        "samples_output": str(Path(args.samples_output)),
-    }
-    manifest_path = Path(args.manifest)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    manifest.update(
+        {
+            "status": "success",
+            "country_slice_rows": sample_rows,
+            "enriched_cases": case_rows,
+            "positive_cases": positives,
+            "base_rate": positives / case_rows if case_rows else None,
+            "countries": enriched_countries,
+            "features": feature_names,
+        }
     )
+    _write_manifest(args.manifest, manifest)
     return (
         f"requested={len(downloads)} downloaded={len(downloaded)} "
         f"missing={len(missing)} slices={sample_rows} cases={case_rows} "
