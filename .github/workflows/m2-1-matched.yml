@@ -5,12 +5,17 @@ on:
   push:
     branches: [main]
     paths:
+      - "src/fencha/cli.py"
       - "src/fencha/m2.py"
       - "src/fencha/m2_1.py"
       - "src/fencha/m2_1_cli.py"
       - "src/fencha/engine.py"
       - "src/fencha/datasets/gdelt.py"
+      - "src/fencha/datasets/gdelt_download.py"
+      - "src/fencha/datasets/parlgov.py"
+      - "src/fencha/datasets/parlgov_download.py"
       - "tests/test_m2_1.py"
+      - "tests/test_parlgov_download.py"
       - ".github/workflows/m2-1-matched.yml"
 
 permissions:
@@ -23,7 +28,7 @@ concurrency:
 jobs:
   matched-architecture:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,6 +38,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+
+      - name: Restore historical source cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw/parlgov
+            data/cache/gdelt
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
 
       - name: Install project
         id: install
@@ -49,23 +63,38 @@ jobs:
         id: parlgov
         if: steps.tests.outcome == 'success'
         continue-on-error: true
+        shell: bash
         run: |
+          mkdir -p data/processed
+          set +e
           python -m fencha build-parlgov \
             --as-of 2023-06-30 \
-            --earliest-cutoff 1945-01-01
+            --earliest-cutoff 1945-01-01 \
+            --download-timeout 120 \
+            --download-retries 3 \
+            2>&1 | tee data/processed/parlgov_build.log
+          status=${PIPESTATUS[0]}
+          exit "$status"
 
       - name: Build sampled GDELT features
         id: gdelt
         if: steps.parlgov.outcome == 'success'
         continue-on-error: true
+        shell: bash
         run: |
+          set +e
           python -m fencha.m2_cli build \
             --start 2020-01-05 \
             --end 2023-01-01 \
             --every-days 7 \
             --hour 12 \
             --workers 3 \
-            --max-missing-rate 0.15
+            --timeout 90 \
+            --retries 2 \
+            --max-missing-rate 0.15 \
+            2>&1 | tee data/processed/gdelt_build.log
+          status=${PIPESTATUS[0]}
+          exit "$status"
 
       - name: Run matched-architecture diagnostic
         id: compare
@@ -80,7 +109,9 @@ jobs:
             --top-k 50 \
             --prior-strength 8 \
             --minimum-similarity 0.05 \
-            --gdelt-multiplier 1.0
+            --gdelt-multiplier 1.0 \
+            --signal-family all \
+            --numeric-scale range
 
       - name: Validate M2.1 report
         id: validate
@@ -99,6 +130,8 @@ jobs:
           assert report["predictions"] >= 200, report
           assert len(report["target_ids"]) == report["predictions"], report
           assert report["top_k"] == 50, report
+          assert report["signal_family"] == "all", report
+          assert report["numeric_scale"] == "range", report
           for model in ("baseline", "structure_analog", "gdelt_analog"):
               assert report[model]["predictions"] == report["predictions"], report
               for metric in ("brier_score", "log_loss", "calibration_error"):
@@ -106,7 +139,7 @@ jobs:
           print(json.dumps(report, indent=2, ensure_ascii=False))
           PY
 
-      - name: Publish run summary
+      - name: Publish run summary and diagnostics
         if: always()
         env:
           SOURCE_SHA: ${{ github.sha }}
@@ -116,6 +149,7 @@ jobs:
           GDELT_OUTCOME: ${{ steps.gdelt.outcome }}
           COMPARE_OUTCOME: ${{ steps.compare.outcome }}
           VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -135,6 +169,48 @@ jobs:
           - validation: $VALIDATE_OUTCOME
           EOF
           sed -i 's/^          //' docs/M2_1_RUN_STATUS.md
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          lines = ["# M2.1 Data Preparation Diagnostics", ""]
+          for title, filename in (
+              ("ParlGov build tail", "data/processed/parlgov_build.log"),
+              ("GDELT build tail", "data/processed/gdelt_build.log"),
+          ):
+              path = Path(filename)
+              lines.extend([f"## {title}", "", "```text"])
+              if path.exists():
+                  content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                  lines.extend(content[-40:])
+              else:
+                  lines.append("not run or no log produced")
+              lines.extend(["```", ""])
+
+          manifest_path = Path("data/processed/gdelt_weekly_manifest.json")
+          lines.extend(["## GDELT manifest summary", ""])
+          if manifest_path.exists():
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              summary = {
+                  key: manifest.get(key)
+                  for key in (
+                      "status",
+                      "requested_files",
+                      "downloaded_files",
+                      "cache_hits",
+                      "missing_files",
+                      "missing_rate",
+                      "error_summary",
+                  )
+              }
+              lines.extend(["```json", json.dumps(summary, indent=2, ensure_ascii=False), "```"])
+          else:
+              lines.append("No GDELT manifest was produced.")
+          Path("docs/M2_1_RUN_DIAGNOSTICS.md").write_text(
+              "\n".join(lines).strip() + "\n", encoding="utf-8"
+          )
+          PY
 
           if [ "$VALIDATE_OUTCOME" = "success" ]; then
             python - <<'PY'
@@ -171,6 +247,8 @@ jobs:
           - top_k: {report['top_k']} for both models
           - prior_strength: {report['prior_strength']} for both models
           - minimum_similarity: {report['minimum_similarity']} for both models
+          - signal family: {report['signal_family']}
+          - numeric scale: {report['numeric_scale']}
           - GDELT multiplier: {report['gdelt_multiplier']}
 
           ## Metrics
@@ -198,14 +276,14 @@ jobs:
           PY
           fi
 
-          git add docs/M2_1_RUN_STATUS.md
+          git add docs/M2_1_RUN_STATUS.md docs/M2_1_RUN_DIAGNOSTICS.md
           if [ -f docs/M2_1_MATCHED_RESULT.md ]; then
             git add docs/M2_1_MATCHED_RESULT.md
           fi
           if git diff --cached --quiet; then
             echo "Summary files unchanged"
           else
-            git commit -m "Record M2.1 run summary [skip ci]"
+            git commit -m "Record M2.1 run diagnostics [skip ci]"
             git push origin HEAD:main
           fi
 
@@ -214,9 +292,13 @@ jobs:
         with:
           name: m2-1-matched
           path: |
+            data/processed/parlgov_build.log
+            data/processed/parlgov_leader_exit_180d.manifest.json
+            data/processed/gdelt_build.log
             data/processed/gdelt_weekly_manifest.json
             data/processed/m2_1_matched_report.json
             data/processed/m2_1_prediction_diagnostics.jsonl
+            data/processed/m2_1_subgroups.json
           if-no-files-found: ignore
           retention-days: 30
 
