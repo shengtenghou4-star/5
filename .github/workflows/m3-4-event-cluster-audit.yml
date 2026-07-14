@@ -6,6 +6,11 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/m3-4-event-cluster-audit.yml"
+      - "src/fencha/event_path_audit.py"
+      - "src/fencha/event_balanced_paths.py"
+      - "src/fencha/conditioned_paths.py"
+      - "src/fencha/datasets/parlgov_competing.py"
+      - "src/fencha/m3_4_event_audit_cli.py"
 
 permissions:
   contents: write
