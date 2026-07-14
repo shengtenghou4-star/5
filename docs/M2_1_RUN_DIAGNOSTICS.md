@@ -9,16 +9,16 @@ cabinets=1618 cases=26436 positives=817 countries=37 output=data/processed/parlg
 ## GDELT build tail
 
 ```text
-GDELT downloads: requested=157 ok=0 cache_hits=0 missing=157 missing_rate=100.0% errors={'tls_error': 157}
+GDELT downloads: requested=157 ok=0 cache_hits=0 tls_fallbacks=0 missing=157 missing_rate=100.0% errors={'tls_error': 157}
 Traceback (most recent call last):
   File "<frozen runpy>", line 198, in _run_module_as_main
   File "<frozen runpy>", line 88, in _run_code
-  File "/home/runner/work/5/5/src/fencha/m2_cli.py", line 248, in <module>
+  File "/home/runner/work/5/5/src/fencha/m2_cli.py", line 262, in <module>
     main()
-  File "/home/runner/work/5/5/src/fencha/m2_cli.py", line 242, in main
+  File "/home/runner/work/5/5/src/fencha/m2_cli.py", line 256, in main
     print(_build(args))
           ^^^^^^^^^^^^
-  File "/home/runner/work/5/5/src/fencha/m2_cli.py", line 174, in _build
+  File "/home/runner/work/5/5/src/fencha/m2_cli.py", line 188, in _build
     raise RuntimeError(str(manifest["failure_reason"]))
 RuntimeError: GDELT missing rate 100.0% exceeds limit 15.0%
 ```
