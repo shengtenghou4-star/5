@@ -2,16 +2,10 @@ name: build historical dataset
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "src/fencha/datasets/**"
-      - "src/fencha/benchmark.py"
-      - "src/fencha/caseio.py"
-      - "src/fencha/cli.py"
-      - "tests/test_parlgov.py"
-      - "tests/test_benchmark.py"
-      - ".github/workflows/build-historical-dataset.yml"
+
+concurrency:
+  group: build-historical-dataset
+  cancel-in-progress: true
 
 jobs:
   parlgov-leader-exit:
