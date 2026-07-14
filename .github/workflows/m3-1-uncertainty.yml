@@ -1,0 +1,167 @@
+name: M3.1 country-cluster uncertainty
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/m3-1-uncertainty.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m3-1-uncertainty
+  cancel-in-progress: true
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore ParlGov source cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw/parlgov
+          key: fencha-historical-sources-v2-parlgov-gdelt-2020-2023
+
+      - name: Install and test
+        run: |
+          python -m pip install -e '.[dev]'
+          pytest -q
+
+      - name: Build multi-horizon cases
+        run: |
+          python -m fencha.m3_cli build \
+            --as-of 2023-06-30 \
+            --earliest-cutoff 1945-01-01 \
+            --horizons 30,90,180,365 \
+            --download-timeout 120 \
+            --download-retries 3
+
+      - name: Run paired country-cluster bootstrap
+        run: |
+          python -m fencha.m3_1_uncertainty_cli \
+            --holdout-start 2015-01-01 \
+            --horizons 30,90,180,365 \
+            --minimum-training-cases 500 \
+            --target-stride 3 \
+            --max-history 3000 \
+            --replicates 10000 \
+            --seed 20260714 \
+            --confidence 0.95
+
+      - name: Validate bootstrap report
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_1_cluster_bootstrap.json")
+              .read_text(encoding="utf-8")
+          )
+          assert report["clusters"] >= 30, report
+          assert report["snapshots"] == 1110, report
+          assert report["replicates"] == 10000, report
+          assert report["seed"] == 20260714, report
+          assert 0.0 <= report["probability_model_better"] <= 1.0, report
+          for key in (
+              "observed_baseline_brier",
+              "observed_model_brier",
+              "observed_paired_delta",
+              "observed_brier_skill",
+              "delta_ci_low",
+              "delta_ci_high",
+              "skill_ci_low",
+              "skill_ci_high",
+          ):
+              assert math.isfinite(report[key]), (key, report[key])
+          assert report["delta_ci_low"] <= report["delta_ci_high"], report
+          assert report["skill_ci_low"] <= report["skill_ci_high"], report
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Publish uncertainty result
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(
+              Path("data/processed/m3_1_cluster_bootstrap.json")
+              .read_text(encoding="utf-8")
+          )
+          promoted = (
+              report["delta_ci_high"] < 0
+              and report["probability_model_better"] >= 0.95
+          )
+          status = "promote to default total-risk model" if promoted else "retain as challenger"
+          text = f"""# M3.1 Country-Cluster Uncertainty Result
+
+          Source commit: `{os.environ['SOURCE_SHA']}`
+
+          ## Paired evaluation
+
+          - Country clusters: {report['clusters']}
+          - Historical snapshots: {report['snapshots']}
+          - Bootstrap replicates: {report['replicates']}
+          - Seed: {report['seed']}
+          - Baseline integrated Brier: {report['observed_baseline_brier']:.9f}
+          - M3.1 integrated Brier: {report['observed_model_brier']:.9f}
+          - Paired delta, model minus baseline: {report['observed_paired_delta']:.9f}
+          - Brier skill: {report['observed_brier_skill']:.6f}
+
+          ## Country-cluster uncertainty
+
+          - Paired-delta 95% interval: [{report['delta_ci_low']:.9f}, {report['delta_ci_high']:.9f}]
+          - Brier-skill 95% interval: [{report['skill_ci_low']:.6f}, {report['skill_ci_high']:.6f}]
+          - Bootstrap probability model is better: {report['probability_model_better']:.2%}
+
+          ## Promotion decision
+
+          **{status}.**
+
+          Promotion requires the paired-delta upper bound to be below zero and at least 95% of country-cluster bootstrap samples to favor the model. No model settings were changed during this analysis.
+          """
+          lines = [line[10:] if line.startswith("          ") else line for line in text.splitlines()]
+          Path("docs/M3_1_UNCERTAINTY_RESULT.md").write_text(
+              "\n".join(lines).strip() + "\n", encoding="utf-8"
+          )
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+          git add docs/M3_1_UNCERTAINTY_RESULT.md
+          if git diff --cached --quiet; then
+            echo "Uncertainty result unchanged"
+          else
+            git commit -m "Record M3.1 uncertainty result [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-1-cluster-bootstrap
+          path: |
+            data/processed/m3_1_snapshot_scores.jsonl
+            data/processed/m3_1_cluster_bootstrap.json
+          if-no-files-found: ignore
+          retention-days: 30
