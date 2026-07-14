@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .caseio import read_jsonl
-from .m2_1 import compare_matched_architecture
+from .m2_1 import compare_matched_architecture, summarize_diagnostics
 
 
 def _date(value: str) -> date:
@@ -19,7 +19,7 @@ def _date(value: str) -> date:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fencha-m2-1",
-        description="Run the matched-architecture M2.1 GDELT diagnostic",
+        description="Run matched-architecture M2.1 GDELT diagnostics",
     )
     parser.add_argument(
         "--cases",
@@ -38,12 +38,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-similarity", type=float, default=0.05)
     parser.add_argument("--gdelt-multiplier", type=float, default=1.0)
     parser.add_argument(
+        "--signal-family",
+        choices=("none", "volume", "conflict", "tone", "all"),
+        default="all",
+    )
+    parser.add_argument(
+        "--numeric-scale",
+        choices=("range", "iqr"),
+        default="range",
+    )
+    parser.add_argument(
+        "--minimum-group-predictions",
+        type=int,
+        default=10,
+    )
+    parser.add_argument(
         "--report-output",
         default="data/processed/m2_1_matched_report.json",
     )
     parser.add_argument(
         "--diagnostics-output",
         default="data/processed/m2_1_prediction_diagnostics.jsonl",
+    )
+    parser.add_argument(
+        "--subgroups-output",
+        default="data/processed/m2_1_subgroups.json",
     )
     return parser
 
@@ -65,6 +84,8 @@ def main() -> None:
         prior_strength=args.prior_strength,
         minimum_similarity=args.minimum_similarity,
         gdelt_multiplier=args.gdelt_multiplier,
+        signal_family=args.signal_family,
+        numeric_scale=args.numeric_scale,
     )
 
     report_path = Path(args.report_output)
@@ -85,14 +106,28 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    subgroup_report = summarize_diagnostics(
+        diagnostics,
+        minimum_group_predictions=args.minimum_group_predictions,
+    )
+    subgroups_path = Path(args.subgroups_output)
+    subgroups_path.parent.mkdir(parents=True, exist_ok=True)
+    subgroups_path.write_text(
+        json.dumps(subgroup_report, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+
     print(
         f"predictions={report.predictions} positives={report.positives} "
+        f"family={report.signal_family} scale={report.numeric_scale} "
         f"structure_brier={report.structure_analog.brier_score:.6f} "
         f"gdelt_brier={report.gdelt_analog.brier_score:.6f} "
         f"gdelt_skill_vs_structure={report.gdelt_brier_skill_vs_structure:.6f} "
         f"mean_abs_delta={report.mean_absolute_probability_delta:.6f} "
         f"neighbor_overlap={report.mean_neighbor_overlap:.6f} "
-        f"report={report_path} diagnostics={diagnostics_path}"
+        f"report={report_path} diagnostics={diagnostics_path} "
+        f"subgroups={subgroups_path}"
     )
 
 
